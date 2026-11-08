@@ -1,0 +1,15 @@
+[package]
+name = "a0"
+version = "0.1.0"
+edition = "2021"
+
+# No dependencies on purpose: the ECS, simulation and renderer are all written here.
+[dependencies]
+
+[lib]
+# cdylib produces the .wasm file for the browser; rlib lets main.rs and tests use the library.
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = true
+codegen-units = 1

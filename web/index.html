@@ -5,35 +5,168 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>a0</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
-    input, button { font-size: 1rem; padding: .4rem .6rem; }
-    #out { margin-top: 1rem; font-weight: 600; }
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #142c5c; font: 13px/1.4 system-ui, sans-serif; color: #eee; }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+    canvas.dragging { cursor: grabbing; }
+    .panel { position: fixed; background: rgba(12, 16, 28, 0.82); border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+    #side { top: 12px; left: 12px; width: 270px; max-height: calc(100% - 24px); overflow: auto; }
+    h1 { font-size: 15px; margin: 0 0 2px; }
+    #date { color: #aab; margin-bottom: 8px; }
+    .controls { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+    button { background: #2a3350; color: #eee; border: 0; border-radius: 5px; padding: 4px 8px; font: inherit; cursor: pointer; }
+    button:hover { background: #3a4570; }
+    button.on { background: #5b6fd6; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+    td { padding: 1px 0; }
+    td.n { text-align: right; font-variant-numeric: tabular-nums; }
+    .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #99a; margin: 8px 0 4px; }
+    #events div { color: #ccd; margin-bottom: 3px; }
+    #tile { white-space: pre-line; }
+    .hint { color: #889; margin-top: 8px; font-size: 12px; }
+    @media (max-width: 600px) { #side { width: auto; right: 12px; max-height: 40%; } }
   </style>
 </head>
 <body>
-  <h1>a0</h1>
-  <p id="status">Loading WebAssembly…</p>
-  <input id="name" placeholder="Your name" disabled>
-  <button id="go" disabled>Greet</button>
-  <p id="out"></p>
+  <canvas id="view"></canvas>
+  <div class="panel" id="side">
+    <h1>a0</h1>
+    <div id="date">Loading…</div>
+    <div class="controls" id="speeds"></div>
+    <table id="civs"></table>
+    <h2>Selected tile</h2>
+    <div id="tile">Click a tile to inspect it.</div>
+    <h2>Events</h2>
+    <div id="events"></div>
+    <div class="controls" style="margin-top:10px"><button id="new">New world</button></div>
+    <div class="hint">Drag to pan · scroll to zoom · space to pause · seed <span id="seed"></span></div>
+  </div>
 
-  <script src="wasm_exec.js"></script>
-  <script>
-    const go = new Go();
-    WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject)
-      .then(({ instance }) => {
-        go.run(instance);
-        document.getElementById("status").textContent = "WebAssembly loaded.";
-        for (const id of ["name", "go"]) document.getElementById(id).disabled = false;
-        const greetNow = () => {
-          document.getElementById("out").textContent = greet(document.getElementById("name").value);
-        };
-        document.getElementById("go").onclick = greetNow;
-        document.getElementById("name").onkeydown = e => { if (e.key === "Enter") greetNow(); };
-      })
-      .catch(err => {
-        document.getElementById("status").textContent = "Failed to load WebAssembly: " + err;
-      });
+  <script type="module">
+    const canvas = document.getElementById("view");
+    const ctx = canvas.getContext("2d");
+    const decoder = new TextDecoder();
+    let wasm;
+
+    // Wasm memory can grow (and its buffer be replaced), so always build a fresh view.
+    const bytes = (ptr, len) => new Uint8Array(wasm.memory.buffer, ptr, len);
+    const text = len => decoder.decode(bytes(wasm.text_ptr(), len));
+
+    const imports = {
+      env: { console_error: (ptr, len) => console.error(decoder.decode(bytes(ptr, len))) },
+    };
+    ({ instance: { exports: wasm } } = await WebAssembly.instantiateStreaming(fetch("a0.wasm"), imports));
+
+    // Render at device resolution, up to 2x, so the map stays crisp.
+    const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
+    function fitCanvas() {
+      canvas.width = Math.floor(innerWidth * dpr());
+      canvas.height = Math.floor(innerHeight * dpr());
+    }
+
+    let seed = Number(new URLSearchParams(location.search).get("seed")) || Math.floor(Math.random() * 1e9);
+    function newWorld() {
+      fitCanvas();
+      wasm.init(seed, canvas.width, canvas.height);
+      document.getElementById("seed").textContent = seed;
+      history.replaceState(null, "", "?seed=" + seed);
+    }
+    newWorld();
+    addEventListener("resize", () => { fitCanvas(); wasm.resize(canvas.width, canvas.height); });
+    document.getElementById("new").onclick = () => { seed = Math.floor(Math.random() * 1e9); newWorld(); };
+
+    // Speed is in simulated months per real second.
+    const speeds = [["Pause", 0], ["Slow", 1], ["Normal", 4], ["Fast", 12], ["Fastest", 48]];
+    let speed = 2, lastSpeed = 2;
+    const speedButtons = speeds.map(([label], i) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.onclick = () => setSpeed(i);
+      document.getElementById("speeds").append(b);
+      return b;
+    });
+    function setSpeed(i) {
+      if (i !== 0) lastSpeed = i;
+      speed = i;
+      speedButtons.forEach((b, j) => b.classList.toggle("on", j === i));
+    }
+    setSpeed(speed);
+    addEventListener("keydown", e => {
+      if (e.code === "Space") { e.preventDefault(); setSpeed(speed === 0 ? lastSpeed : 0); }
+    });
+
+    // Drag to pan; a press that barely moves counts as a click and selects a tile.
+    let drag = null;
+    canvas.addEventListener("pointerdown", e => {
+      drag = { x: e.clientX, y: e.clientY, moved: 0 };
+      canvas.setPointerCapture(e.pointerId);
+      canvas.classList.add("dragging");
+    });
+    canvas.addEventListener("pointermove", e => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.moved += Math.abs(dx) + Math.abs(dy);
+      drag.x = e.clientX; drag.y = e.clientY;
+      wasm.pan(dx * dpr(), dy * dpr());
+    });
+    canvas.addEventListener("pointerup", e => {
+      if (drag && drag.moved < 5) { wasm.select(e.clientX * dpr(), e.clientY * dpr()); updatePanel(); }
+      drag = null;
+      canvas.classList.remove("dragging");
+    });
+    canvas.addEventListener("wheel", e => {
+      e.preventDefault();
+      wasm.zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX * dpr(), e.clientY * dpr());
+    }, { passive: false });
+
+    const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+    function updatePanel() {
+      const rows = text(wasm.panel_text()).split("\n").filter(Boolean).map(l => l.split("\t"));
+      let civs = "<tr><td></td><td class=n>cities</td><td class=n>people</td></tr>", events = "", tile = null;
+      for (const [kind, ...f] of rows) {
+        if (kind === "date") document.getElementById("date").textContent = f[0];
+        if (kind === "civ") civs += `<tr><td><span class=swatch style="background:${f[0]}"></span>${esc(f[1])}${f[4] > 0 ? " 🚶" : ""}</td><td class=n>${f[2]}</td><td class=n>${Number(f[3]).toLocaleString()}</td></tr>`;
+        if (kind === "event") events += `<div>${esc(f[0])}</div>`;
+        if (kind === "tile") tile = f[0].replaceAll("|", "\n");
+      }
+      document.getElementById("civs").innerHTML = civs;
+      document.getElementById("events").innerHTML = events;
+      if (tile !== null) document.getElementById("tile").textContent = tile;
+    }
+
+    function drawLabels() {
+      const s = dpr();
+      ctx.font = `600 ${12 * s}px system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.lineWidth = 3 * s;
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      for (const line of text(wasm.labels_text()).split("\n")) {
+        if (!line) continue;
+        const [x, y, color, label] = line.split("\t");
+        ctx.fillStyle = color;
+        ctx.strokeText(label, +x, +y - 4 * s);
+        ctx.fillText(label, +x, +y - 4 * s);
+      }
+    }
+
+    let last = performance.now(), pending = 0, lastPanel = 0;
+    function frame(now) {
+      const dt = Math.min(0.25, (now - last) / 1000);
+      last = now;
+      pending += dt * speeds[speed][1];
+      const months = Math.floor(pending);
+      if (months > 0) { wasm.step(months); pending -= months; }
+
+      const ptr = wasm.render();
+      const pixels = new Uint8ClampedArray(wasm.memory.buffer, ptr, canvas.width * canvas.height * 4);
+      ctx.putImageData(new ImageData(pixels, canvas.width, canvas.height), 0, 0);
+      drawLabels();
+
+      if (now - lastPanel > 250) { updatePanel(); lastPanel = now; }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
   </script>
 </body>
 </html>

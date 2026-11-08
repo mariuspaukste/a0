@@ -1,19 +1,22 @@
-export GO111MODULE := on
-
-.PHONY: test build serve clean
+.PHONY: test run web serve clean
 
 test:
-	go test ./...
+	cargo test --release
 
-build:
+# Simulate in the terminal: make run YEARS=100 SEED=7
+run:
+	cargo run --release -- $(or $(YEARS),50) $(or $(SEED),1)
+
+web:
+	cargo build --release --lib --target wasm32-unknown-unknown
 	mkdir -p dist
 	cp web/* dist/
-	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" dist/
-	GOOS=js GOARCH=wasm go build -o dist/main.wasm .
+	cp target/wasm32-unknown-unknown/release/a0.wasm dist/
 
-serve: build
+serve: web
 	@echo "Open http://localhost:8080"
 	cd dist && python3 -m http.server 8080
 
 clean:
+	cargo clean
 	rm -rf dist

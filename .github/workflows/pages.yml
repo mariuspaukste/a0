@@ -19,22 +19,24 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - uses: actions/checkout@v5
+
+      - name: Install Rust with the wasm target
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
 
       - name: Test
-        run: go test ./...
+        run: cargo test --release
 
       - name: Build wasm
         run: |
+          cargo build --release --lib --target wasm32-unknown-unknown
           mkdir -p dist
           cp web/* dist/
-          cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" dist/
-          GOOS=js GOARCH=wasm go build -o dist/main.wasm .
+          cp target/wasm32-unknown-unknown/release/a0.wasm dist/
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         if: github.ref == 'refs/heads/main'
         with:
           path: dist
