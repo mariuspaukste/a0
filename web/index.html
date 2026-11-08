@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>a0</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
+    input, button { font-size: 1rem; padding: .4rem .6rem; }
+    #out { margin-top: 1rem; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>a0</h1>
+  <p id="status">Loading WebAssembly…</p>
+  <input id="name" placeholder="Your name" disabled>
+  <button id="go" disabled>Greet</button>
+  <p id="out"></p>
+
+  <script src="wasm_exec.js"></script>
+  <script>
+    const go = new Go();
+    WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject)
+      .then(({ instance }) => {
+        go.run(instance);
+        document.getElementById("status").textContent = "WebAssembly loaded.";
+        for (const id of ["name", "go"]) document.getElementById(id).disabled = false;
+        const greetNow = () => {
+          document.getElementById("out").textContent = greet(document.getElementById("name").value);
+        };
+        document.getElementById("go").onclick = greetNow;
+        document.getElementById("name").onkeydown = e => { if (e.key === "Enter") greetNow(); };
+      })
+      .catch(err => {
+        document.getElementById("status").textContent = "Failed to load WebAssembly: " + err;
+      });
+  </script>
+</body>
+</html>
