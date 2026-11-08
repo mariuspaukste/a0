@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use crate::render::{self, Camera, Framebuffer};
 use crate::sim::{Simulation, MAP_HEIGHT, MAP_WIDTH};
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     /// Provided by the page (`env.console_error`).
     fn console_error(ptr: *const u8, len: usize);
