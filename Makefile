@@ -3,9 +3,9 @@
 test:
 	cargo test --release
 
-# Simulate in the terminal: make run YEARS=100 SEED=7
+# Simulate in the terminal: make run YEARS=100 SEED=7 SCENARIO=india
 run:
-	cargo run --release -- $(or $(YEARS),50) $(or $(SEED),1)
+	cargo run --release -- $(or $(YEARS),50) $(or $(SEED),1) $(or $(SCENARIO),newworld)
 
 web:
 	cargo build --release --lib --target wasm32-unknown-unknown

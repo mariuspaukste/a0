@@ -2,51 +2,72 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>a0</title>
   <style>
     :root { color-scheme: dark; }
     html, body { margin: 0; height: 100%; overflow: hidden; background: #142c5c; font: 13px/1.4 system-ui, sans-serif; color: #eee; }
     canvas { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
     canvas.dragging { cursor: grabbing; }
-    .panel { position: fixed; background: rgba(12, 16, 28, 0.82); border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
-    #side { top: 12px; left: 12px; width: 270px; max-height: calc(100% - 24px); overflow: auto; }
-    h1 { font-size: 15px; margin: 0 0 2px; }
+    .panel { position: fixed; background: rgba(12, 16, 28, 0.84); border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+    #side { top: 12px; left: 12px; width: 290px; max-height: calc(100% - 24px); overflow: auto; box-sizing: border-box; }
+    header { display: flex; align-items: baseline; gap: 8px; }
+    h1 { font-size: 15px; margin: 0 0 2px; flex: 1; }
+    #toggle { display: none; }
     #date { color: #aab; margin-bottom: 8px; }
     .controls { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
-    button { background: #2a3350; color: #eee; border: 0; border-radius: 5px; padding: 4px 8px; font: inherit; cursor: pointer; }
+    button { background: #2a3350; color: #eee; border: 0; border-radius: 5px; padding: 5px 9px; font: inherit; cursor: pointer; }
     button:hover { background: #3a4570; }
     button.on { background: #5b6fd6; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
-    td { padding: 1px 0; }
-    td.n { text-align: right; font-variant-numeric: tabular-nums; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+    td { padding: 1px 0; vertical-align: top; }
+    td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 6px; }
+    .status { color: #889; font-size: 11px; }
     .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
     h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #99a; margin: 8px 0 4px; }
     #events div { color: #ccd; margin-bottom: 3px; }
-    #tile { white-space: pre-line; }
+    #tile, #unit { white-space: pre-line; }
+    #unitbox { display: none; border: 1px solid #c9a227; border-radius: 6px; padding: 6px 8px; margin: 8px 0; }
+    #say { color: #ffd76a; margin: 4px 0; }
     .hint { color: #889; margin-top: 8px; font-size: 12px; }
-    @media (max-width: 600px) { #side { width: auto; right: 12px; max-height: 40%; } }
+    #zoom { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+    #zoom button { width: 40px; height: 40px; font-size: 20px; padding: 0; background: rgba(42, 51, 80, 0.9); }
+    @media (max-width: 600px) {
+      #side { top: auto; bottom: 0; left: 0; right: 0; width: auto; max-height: 48%; border-radius: 12px 12px 0 0; }
+      #side.collapsed { max-height: 76px; overflow: hidden; }
+      #toggle { display: inline-block; }
+      #zoom { bottom: auto; top: 12px; }
+      button { padding: 7px 11px; }
+    }
   </style>
 </head>
 <body>
   <canvas id="view"></canvas>
   <div class="panel" id="side">
-    <h1>a0</h1>
+    <header><h1 id="title">a0</h1><button id="toggle">▾</button></header>
     <div id="date">Loading…</div>
     <div class="controls" id="speeds"></div>
-    <table id="civs"></table>
+    <div class="controls" id="scenarios"></div>
+    <div id="unitbox">
+      <div id="unit"></div>
+      <div id="say"></div>
+      <div class="controls" style="margin:4px 0 0"><button id="auto">Automatic</button><button id="done">Done</button></div>
+    </div>
+    <div id="civs"></div>
     <h2>Selected tile</h2>
-    <div id="tile">Click a tile to inspect it.</div>
+    <div id="tile">Tap a tile to inspect it, or a ship or settlers to give them orders.</div>
     <h2>Events</h2>
     <div id="events"></div>
     <div class="controls" style="margin-top:10px"><button id="new">New world</button></div>
-    <div class="hint">Drag to pan · scroll to zoom · space to pause · seed <span id="seed"></span></div>
+    <div class="hint">Drag to pan · pinch or scroll to zoom · space to pause · seed <span id="seed"></span></div>
   </div>
+  <div id="zoom"><button id="zin">+</button><button id="zout">−</button></div>
 
   <script type="module">
     const canvas = document.getElementById("view");
     const ctx = canvas.getContext("2d");
     const decoder = new TextDecoder();
+    const $ = id => document.getElementById(id);
     let wasm;
 
     // Wasm memory can grow (and its buffer be replaced), so always build a fresh view.
@@ -65,16 +86,43 @@
       canvas.height = Math.floor(innerHeight * dpr());
     }
 
-    let seed = Number(new URLSearchParams(location.search).get("seed")) || Math.floor(Math.random() * 1e9);
+    const scenarios = [["New World", "newworld"], ["India", "india"]];
+    const params = new URLSearchParams(location.search);
+    let seed = Number(params.get("seed")) || Math.floor(Math.random() * 1e9);
+    let scenario = Math.max(0, scenarios.findIndex(([, key]) => key === params.get("scenario")));
+    const scenarioButtons = scenarios.map(([label], i) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.onclick = () => { scenario = i; newWorld(); };
+      $("scenarios").append(b);
+      return b;
+    });
+    // Building a world takes a moment (its peoples grow for a few generations before
+    // 1600), so show a message first and build on the next tick.
+    let ready = false;
     function newWorld() {
-      fitCanvas();
-      wasm.init(seed, canvas.width, canvas.height);
-      document.getElementById("seed").textContent = seed;
-      history.replaceState(null, "", "?seed=" + seed);
+      ready = false;
+      $("date").textContent = "Building the world…";
+      scenarioButtons.forEach((b, i) => b.classList.toggle("on", i === scenario));
+      setTimeout(() => {
+        fitCanvas();
+        wasm.init(seed, canvas.width, canvas.height, scenario);
+        $("seed").textContent = seed;
+        $("tile").textContent = "Tap a tile to inspect it, or a ship or settlers to give them orders.";
+        history.replaceState(null, "", `?scenario=${scenarios[scenario][1]}&seed=${seed}`);
+        ready = true;
+        updatePanel();
+      }, 30);
     }
     newWorld();
-    addEventListener("resize", () => { fitCanvas(); wasm.resize(canvas.width, canvas.height); });
-    document.getElementById("new").onclick = () => { seed = Math.floor(Math.random() * 1e9); newWorld(); };
+    addEventListener("resize", () => { if (!ready) return; fitCanvas(); wasm.resize(canvas.width, canvas.height); });
+    $("new").onclick = () => { seed = Math.floor(Math.random() * 1e9); newWorld(); };
+    $("auto").onclick = () => { if (ready) { wasm.automate(); updatePanel(); } };
+    $("done").onclick = () => { if (ready) { wasm.release_unit(); updatePanel(); } };
+    $("toggle").onclick = () => {
+      const collapsed = $("side").classList.toggle("collapsed");
+      $("toggle").textContent = collapsed ? "▴" : "▾";
+    };
 
     // Speed is in simulated months per real second.
     const speeds = [["Pause", 0], ["Slow", 1], ["Normal", 4], ["Fast", 12], ["Fastest", 48]];
@@ -83,7 +131,7 @@
       const b = document.createElement("button");
       b.textContent = label;
       b.onclick = () => setSpeed(i);
-      document.getElementById("speeds").append(b);
+      $("speeds").append(b);
       return b;
     });
     function setSpeed(i) {
@@ -96,43 +144,87 @@
       if (e.code === "Space") { e.preventDefault(); setSpeed(speed === 0 ? lastSpeed : 0); }
     });
 
-    // Drag to pan; a press that barely moves counts as a click and selects a tile.
-    let drag = null;
+    // One finger (or the mouse) drags to pan; a press that barely moves is a tap.
+    // Two fingers pinch to zoom and pan together.
+    const pointers = new Map();
+    let moved = 0, pinch = null;
+    const center = () => {
+      const [a, b] = [...pointers.values()];
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) };
+    };
     canvas.addEventListener("pointerdown", e => {
-      drag = { x: e.clientX, y: e.clientY, moved: 0 };
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       canvas.setPointerCapture(e.pointerId);
       canvas.classList.add("dragging");
+      if (pointers.size === 1) moved = 0;
+      if (pointers.size === 2) pinch = center();
     });
     canvas.addEventListener("pointermove", e => {
-      if (!drag) return;
-      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      drag.moved += Math.abs(dx) + Math.abs(dy);
-      drag.x = e.clientX; drag.y = e.clientY;
-      wasm.pan(dx * dpr(), dy * dpr());
+      const p = pointers.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (!ready) return;
+      if (pointers.size === 1) {
+        moved += Math.abs(dx) + Math.abs(dy);
+        wasm.pan(dx * dpr(), dy * dpr());
+      } else if (pointers.size === 2 && pinch) {
+        const now = center();
+        moved = Infinity;
+        wasm.pan((now.x - pinch.x) * dpr(), (now.y - pinch.y) * dpr());
+        if (pinch.d > 0) wasm.zoom(now.d / pinch.d, now.x * dpr(), now.y * dpr());
+        pinch = now;
+      }
     });
-    canvas.addEventListener("pointerup", e => {
-      if (drag && drag.moved < 5) { wasm.select(e.clientX * dpr(), e.clientY * dpr()); updatePanel(); }
-      drag = null;
-      canvas.classList.remove("dragging");
-    });
+    const lift = e => {
+      if (!pointers.has(e.pointerId)) return;
+      const tapped = pointers.size === 1 && moved < 8;
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) canvas.classList.remove("dragging");
+      if (tapped && ready && e.type === "pointerup") {
+        wasm.tap(e.clientX * dpr(), e.clientY * dpr(), 22 * dpr());
+        updatePanel();
+      }
+    };
+    canvas.addEventListener("pointerup", lift);
+    canvas.addEventListener("pointercancel", lift);
     canvas.addEventListener("wheel", e => {
       e.preventDefault();
+      if (!ready) return;
       wasm.zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX * dpr(), e.clientY * dpr());
     }, { passive: false });
+    const zoomCenter = f => ready && wasm.zoom(f, canvas.width / 2, canvas.height / 2);
+    $("zin").onclick = () => zoomCenter(1.5);
+    $("zout").onclick = () => zoomCenter(1 / 1.5);
 
     const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
     function updatePanel() {
       const rows = text(wasm.panel_text()).split("\n").filter(Boolean).map(l => l.split("\t"));
-      let civs = "<tr><td></td><td class=n>cities</td><td class=n>people</td></tr>", events = "", tile = null;
+      let heads = ["", ""], groups = [[], []], events = "", tile = null, unit = null, say = "";
       for (const [kind, ...f] of rows) {
-        if (kind === "date") document.getElementById("date").textContent = f[0];
-        if (kind === "civ") civs += `<tr><td><span class=swatch style="background:${f[0]}"></span>${esc(f[1])}${f[4] > 0 ? " 🚶" : ""}</td><td class=n>${f[2]}</td><td class=n>${Number(f[3]).toLocaleString()}</td></tr>`;
+        if (kind === "date") $("date").textContent = f[0];
+        if (kind === "title") $("title").textContent = `a0 · ${f[0]}`;
+        if (kind === "heads") heads = f;
+        if (kind === "civ") {
+          const [color, local, name, towns, people, status] = f;
+          groups[local === "1" ? 0 : 1].push(
+            `<tr><td><span class=swatch style="background:${color}"></span>${esc(name)}` +
+            (status ? `<div class=status>${esc(status)}</div>` : "") +
+            `</td><td class=n>${towns}</td><td class=n>${people}</td></tr>`);
+        }
         if (kind === "event") events += `<div>${esc(f[0])}</div>`;
         if (kind === "tile") tile = f[0].replaceAll("|", "\n");
+        if (kind === "unit") unit = f[0].replaceAll("|", "\n");
+        if (kind === "say") say = f[0];
       }
-      document.getElementById("civs").innerHTML = civs;
-      document.getElementById("events").innerHTML = events;
-      if (tile !== null) document.getElementById("tile").textContent = tile;
+      $("civs").innerHTML = groups.map((rows, i) =>
+        `<h2>${esc(heads[i])}</h2><table><tr><td></td><td class=n>towns</td><td class=n>people</td></tr>${rows.join("")}</table>`).join("");
+      $("events").innerHTML = events;
+      if (tile !== null) $("tile").textContent = tile;
+      $("unitbox").style.display = unit ? "block" : "none";
+      if (unit) $("unit").textContent = unit;
+      $("say").textContent = say;
     }
 
     function drawLabels() {
@@ -154,6 +246,7 @@
     function frame(now) {
       const dt = Math.min(0.25, (now - last) / 1000);
       last = now;
+      if (!ready) { requestAnimationFrame(frame); return; }
       pending += dt * speeds[speed][1];
       const months = Math.floor(pending);
       if (months > 0) { wasm.step(months); pending -= months; }
