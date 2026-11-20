@@ -1,4 +1,5 @@
 pub mod ecs;
+pub mod era;
 pub mod render;
 pub mod sim;
 pub mod world;
