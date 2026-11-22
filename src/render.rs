@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 
 use crate::ecs::Entity;
 use crate::era::{self, Culture, Setting};
-use crate::sim::{group, Building, City, Civ, Owner, Position, Settler, Ship, Simulation, Tiles};
+use crate::sim::{
+    group, Building, Burning, City, Civ, LandValue, Owner, Position, Settler, Ship, Simulation,
+    Tiles,
+};
 use crate::world::{hash, Map, Terrain};
 
 type Rgb = [u8; 3];
@@ -49,6 +52,24 @@ impl Framebuffer {
 
     fn clear(&mut self, color: Rgb) {
         self.pixels.fill(pack(color));
+    }
+
+    /// Blends `color` over the pixels in `r`, by `t` from 0 (none) to 1 (all).
+    fn tint(&mut self, r: Rect, color: Rgb, t: f32) {
+        let x0 = r.x0.clamp(0, self.width as i32) as usize;
+        let x1 = r.x1.clamp(0, self.width as i32) as usize;
+        let y0 = r.y0.clamp(0, self.height as i32) as usize;
+        let y1 = r.y1.clamp(0, self.height as i32) as usize;
+        for y in y0..y1 {
+            for p in &mut self.pixels[y * self.width + x0..y * self.width + x1] {
+                let old = [
+                    (*p & 255) as u8,
+                    (*p >> 8 & 255) as u8,
+                    (*p >> 16 & 255) as u8,
+                ];
+                *p = pack(mix(old, color, t));
+            }
+        }
     }
 
     fn fill(&mut self, r: Rect, color: Rgb) {
@@ -289,12 +310,35 @@ impl Camera {
     }
 }
 
-/// The people a town belongs to: their id, color and culture.
+/// The people a town belongs to: their id, color and culture, and whether the town
+/// builds in brick.
 #[derive(Clone, Copy)]
 struct Folk {
     civ: Entity,
     color: Rgb,
     culture: Culture,
+    brick: bool,
+}
+
+/// Extra information drawn over the map.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overlay {
+    #[default]
+    None,
+    /// Town lots colored from red (cheap) through yellow to green (dear).
+    LandValue,
+}
+
+/// The overlay color for a land value from 0 to 100. Most lots are worth between 30
+/// and 75, so the colors span that.
+fn value_color(value: u8) -> Rgb {
+    let t = ((value as f32 - 30.0) / 45.0).clamp(0.0, 1.0);
+    let (low, mid, high) = ([200, 56, 48], [236, 204, 72], [56, 172, 84]);
+    if t < 0.5 {
+        mix(low, mid, t * 2.0)
+    } else {
+        mix(mid, high, (t - 0.5) * 2.0)
+    }
 }
 
 fn town_folk(sim: &Simulation) -> BTreeMap<Entity, Folk> {
@@ -303,13 +347,14 @@ fn town_folk(sim: &Simulation) -> BTreeMap<Entity, Folk> {
     sim.world
         .read::<City>()
         .iter()
-        .filter_map(|(e, _)| {
+        .filter_map(|(e, city)| {
             let civ = owners.get(e)?.0;
             let c = civs.get(civ)?;
             let folk = Folk {
                 civ,
                 color: c.color,
                 culture: c.culture,
+                brick: city.brick_since.is_some(),
             };
             Some((e, folk))
         })
@@ -322,10 +367,13 @@ pub fn render(
     fb: &mut Framebuffer,
     selected: Option<(i32, i32)>,
     unit: Option<Entity>,
+    overlay: Overlay,
 ) {
     fb.clear(SEA);
     let map = sim.world.resource::<Map>();
     let tiles = sim.world.resource::<Tiles>();
+    let land = sim.world.resource::<LandValue>();
+    let burning = sim.world.resource::<Burning>();
     let rules = sim.rules();
     let season = Season {
         month: sim.month(),
@@ -355,7 +403,14 @@ pub fn render(
             }
             fb.fill(r, color);
             let snow = season.snow(x, y, latitude);
-            draw_building(fb, &tiles, &season, snow, (x, y), r, folk);
+            let lit = tiles.building(x, y) == Building::Ruins && burning.is_burning(x, y);
+            draw_building(fb, &tiles, &season, snow, (x, y), r, folk, lit);
+            if overlay == Overlay::LandValue {
+                match land.get(x, y) {
+                    Some(value) => fb.tint(r, value_color(value), 0.55),
+                    None => fb.tint(r, [24, 28, 40], 0.45),
+                }
+            }
 
             // Draw the border on edges where the neighbor belongs to someone else.
             if let Some(f) = folk {
@@ -464,6 +519,8 @@ fn draw_ship(fb: &mut Framebuffer, r: Rect, flag: Rgb, laden: bool) {
     );
 }
 
+/// Draws what's built on a tile. `burning` is for ruins still in flames.
+#[allow(clippy::too_many_arguments)]
 fn draw_building(
     fb: &mut Framebuffer,
     tiles: &Tiles,
@@ -472,6 +529,7 @@ fn draw_building(
     (x, y): (i32, i32),
     r: Rect,
     folk: Option<Folk>,
+    burning: bool,
 ) {
     let w = r.width();
     let civ = folk.map_or(WHITE, |f| f.color);
@@ -513,7 +571,10 @@ fn draw_building(
             fb.fill(r.inset(0.4), civ);
         }
         Building::House => {
+            let brick = folk.is_some_and(|f| f.brick);
             let (walls, roof) = match folk.map(|f| f.culture) {
+                // Rebuilt in brick after a great fire.
+                Some(Culture::English | Culture::French) if brick => ([164, 74, 54], [90, 60, 50]),
                 // Whitewashed brick and stone with flat roofs.
                 Some(Culture::Indian) => ([232, 214, 178], [196, 160, 112]),
                 Some(Culture::Portuguese) => ([236, 232, 222], [184, 84, 56]),
@@ -604,6 +665,40 @@ fn draw_building(
                 body.inset_xy(0.06, 0.0).band(0.0, 0.45),
                 wintry(shade(bark, 0.8)),
             );
+        }
+        Building::Ruins if burning => {
+            // Still burning: flames over charred timbers.
+            fb.fill(r.inset(0.08), [70, 40, 30]);
+            fb.fill(r.inset(0.18), [232, 92, 32]);
+            fb.fill(r.inset_xy(0.3, 0.0).band(0.3, 0.85), FIRE);
+            fb.fill(r.inset_xy(0.4, 0.0).band(0.5, 0.85), [255, 228, 132]);
+        }
+        Building::Ruins => {
+            // Blackened walls and ash.
+            let ash = wintry([88, 82, 78]);
+            fb.fill(r.inset(0.14), [52, 46, 42]);
+            fb.fill(r.inset(0.14).band(0.55, 1.0), ash);
+            if w >= 8 {
+                let post = (w / 8).max(1);
+                fb.fill(
+                    Rect::new(
+                        r.x0 + w / 4,
+                        r.y0 + w / 5,
+                        r.x0 + w / 4 + post,
+                        r.y1 - w / 5,
+                    ),
+                    [30, 26, 24],
+                );
+                fb.fill(
+                    Rect::new(
+                        r.x1 - w / 3,
+                        r.y0 + w / 3,
+                        r.x1 - w / 3 + post,
+                        r.y1 - w / 5,
+                    ),
+                    [30, 26, 24],
+                );
+            }
         }
         Building::Field => {
             // Maize, beans and squash grown together on small mounds.

@@ -29,9 +29,23 @@ Both run on a real calendar with seasons: one harvest a year to last until the n
 snow in northern winters, autumn colours, monsoon greens. Population numbers are scaled
 down to fit the map but keep their proportions.
 
+## Towns
+
+Every lot in a town has a land value. Lots near the market square, the waterfront, the
+wharves and the church are dear, and lots next to smithies, tanneries and burnt ruins are
+cheap. Houses and the church take the best lots they can find. The trades take cheap
+ground at the edge, and as a town grows around them they sell up and move out, leaving
+their lots to houses.
+
+Fires break out now and then, more often in winter and in bigger towns. Most are put out
+after a house or two, but on a windy night a fire can leap the streets and take a whole
+quarter. Timber towns burn worst; brick, stone and adobe much less. A colony that suffers a
+great fire rebuilds in brick and stone, as Boston was ordered to after its fire of 1679. Burnt lots are cleared and built on again.
+
 ## Controls
 
 Drag to pan, pinch or scroll to zoom, space to pause. Tap a tile to inspect it.
+**Land value** colours town lots from red (cheap) to green (dear).
 
 Ships and bands of settlers run themselves, but you can take over any of them. Tap one
 to pick it (it's ringed in gold and its route is dotted), then tap where it should go:

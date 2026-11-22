@@ -7,7 +7,7 @@ use std::cell::RefCell;
 
 use crate::ecs::Entity;
 use crate::era::Setting;
-use crate::render::{self, Camera, Framebuffer};
+use crate::render::{self, Camera, Framebuffer, Overlay};
 use crate::sim::{format_date, group, Simulation};
 
 #[link(wasm_import_module = "env")]
@@ -25,6 +25,7 @@ struct App {
     unit: Option<Entity>,
     /// The reply to the player's last order.
     message: String,
+    overlay: Overlay,
     /// Holds the last string handed to the page, so it stays valid until the next call.
     text: String,
 }
@@ -70,6 +71,7 @@ pub extern "C" fn init(seed: u32, width: u32, height: u32, scenario: u32) {
         selected: None,
         unit: None,
         message: String::new(),
+        overlay: Overlay::None,
         text: String::new(),
     };
     APP.with(|slot| *slot.borrow_mut() = Some(app));
@@ -97,9 +99,27 @@ pub extern "C" fn step(months: u32) {
 #[no_mangle]
 pub extern "C" fn render() -> *const u32 {
     with_app(|app| {
-        render::render(&app.sim, &app.camera, &mut app.fb, app.selected, app.unit);
+        render::render(
+            &app.sim,
+            &app.camera,
+            &mut app.fb,
+            app.selected,
+            app.unit,
+            app.overlay,
+        );
         app.fb.pixels.as_ptr()
     })
+}
+
+/// Picks what's drawn over the map: 0 for nothing, 1 for land values.
+#[no_mangle]
+pub extern "C" fn set_overlay(overlay: u32) {
+    with_app(|app| {
+        app.overlay = match overlay {
+            1 => Overlay::LandValue,
+            _ => Overlay::None,
+        }
+    });
 }
 
 #[no_mangle]

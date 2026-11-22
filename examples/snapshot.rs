@@ -1,6 +1,6 @@
 //! Renders a frame to a PPM image: cargo run --example snapshot -- india 40 1 out.ppm [zoom cx cy]
 use a0::era::Setting;
-use a0::render::{render, Camera, Framebuffer};
+use a0::render::{render, Camera, Framebuffer, Overlay};
 use a0::sim::Simulation;
 use std::io::Write;
 fn main() {
@@ -24,7 +24,12 @@ fn main() {
         cam.y = a[6].parse().unwrap();
     }
     let unit = sim.unit_near(cam.x, cam.y, 200.0);
-    render(&sim, &cam, &mut fb, None, unit);
+    let overlay = if std::env::var("OVERLAY").is_ok() {
+        Overlay::LandValue
+    } else {
+        Overlay::None
+    };
+    render(&sim, &cam, &mut fb, None, unit, overlay);
     let mut f = std::fs::File::create(&a[3]).unwrap();
     write!(f, "P6\n{} {}\n255\n", fb.width, fb.height).unwrap();
     for p in &fb.pixels {

@@ -48,6 +48,7 @@
     <div id="date">Loading…</div>
     <div class="controls" id="speeds"></div>
     <div class="controls" id="scenarios"></div>
+    <div class="controls"><button id="landvalue" title="Color town lots by what they're worth">Land value</button></div>
     <div id="unitbox">
       <div id="unit"></div>
       <div id="say"></div>
@@ -107,6 +108,7 @@
       setTimeout(() => {
         fitCanvas();
         wasm.init(seed, canvas.width, canvas.height, scenario);
+        wasm.set_overlay(overlay);
         $("seed").textContent = seed;
         $("tile").textContent = "Tap a tile to inspect it, or a ship or settlers to give them orders.";
         history.replaceState(null, "", `?scenario=${scenarios[scenario][1]}&seed=${seed}`);
@@ -117,6 +119,13 @@
     newWorld();
     addEventListener("resize", () => { if (!ready) return; fitCanvas(); wasm.resize(canvas.width, canvas.height); });
     $("new").onclick = () => { seed = Math.floor(Math.random() * 1e9); newWorld(); };
+    // Overlays: town lots colored from red (cheap) to green (dear).
+    let overlay = 0;
+    $("landvalue").onclick = () => {
+      overlay = overlay ? 0 : 1;
+      $("landvalue").classList.toggle("on", overlay === 1);
+      if (ready) wasm.set_overlay(overlay);
+    };
     $("auto").onclick = () => { if (ready) { wasm.automate(); updatePanel(); } };
     $("done").onclick = () => { if (ready) { wasm.release_unit(); updatePanel(); } };
     $("toggle").onclick = () => {

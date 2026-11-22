@@ -6,7 +6,7 @@
 //! they harvested. Ships and settlers run themselves, but any of them can be given
 //! orders (see [`Simulation::order`]).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::ecs::{Commands, Entity, Schedule, World};
 use crate::era::{self, Culture, Landing, Scenario, Setting};
@@ -42,6 +42,26 @@ const LOG_LENGTH: usize = 40;
 const HEARTLAND: i32 = 30;
 /// How far a trading factory draws merchants, weavers and goods from.
 const TRADE_RADIUS: i32 = 25;
+
+// Fire. Every hearth, forge and candle could start one, and in a town of timber and
+// thatch it ran from roof to roof and leapt the streets on the wind.
+/// Chance a month that each house (workshops count double) starts a fire.
+const IGNITION: f32 = 0.00025;
+/// A town's chance of a fire in a month never goes above this, however big it is:
+/// big cities kept fire watches and buckets.
+const MAX_IGNITION: f32 = 0.02;
+/// How much harder it is for a fire to leap a street than to spread next door.
+const STREET_JUMP: f32 = 0.35;
+/// A workshop on a lot worth at least this moves out to one worth `RELOCATE_GAIN` less.
+const RELOCATE_VALUE: u8 = 55;
+const RELOCATE_GAIN: u8 = 15;
+/// Chance a month that a town looks at moving a workshop out.
+const RELOCATE_CHANCE: f32 = 1.0 / 6.0;
+/// The most buildings one fire can take.
+const MAX_FIRE: usize = 80;
+/// A fire that takes this many buildings is a great fire, and a colony rebuilds in
+/// brick and stone after one.
+const GREAT_FIRE: usize = 12;
 
 // Demography, per person per month. Colonists had very large families and, once past
 // the first years, lower mortality than in Europe: colonial America grew about 2.5% a
@@ -253,6 +273,10 @@ pub struct City {
     /// When hunger here last made the news.
     hunger_reported: u32,
     milestone: u32,
+    /// When the town took to building in brick and stone after a great fire.
+    pub brick_since: Option<u32>,
+    /// The month of the town's last fire and how many buildings it took.
+    pub last_fire: Option<(u32, u32)>,
 }
 
 impl City {
@@ -270,6 +294,8 @@ impl City {
             seasoning_until: 0,
             hunger_reported: 0,
             milestone: 0,
+            brick_since: None,
+            last_fire: None,
         }
     }
 }
@@ -344,6 +370,8 @@ pub enum Building {
     Longhouse,
     /// Maize, beans and squash grown together.
     Field,
+    /// What a fire leaves behind, until the lot is cleared and built on again.
+    Ruins,
 }
 
 impl Building {
@@ -357,7 +385,7 @@ impl Building {
             Building::House | Building::Workshop => 16.0,
             Building::Wharf => 20.0,
             Building::Church => 40.0,
-            Building::Empty | Building::Fort | Building::Village => 0.0,
+            Building::Empty | Building::Fort | Building::Village | Building::Ruins => 0.0,
         }
     }
 
@@ -376,6 +404,7 @@ impl Building {
             Building::Village => "Village",
             Building::Longhouse => "Longhouse",
             Building::Field => "Maize fields",
+            Building::Ruins => "Burnt ruins",
         }
     }
 
@@ -388,6 +417,14 @@ impl Building {
         matches!(
             self,
             Building::Farm | Building::Field | Building::Plantation
+        )
+    }
+
+    /// Timber, thatch and stores that catch fire.
+    fn burns(self) -> bool {
+        matches!(
+            self,
+            Building::House | Building::Workshop | Building::Wharf | Building::Church
         )
     }
 
@@ -718,6 +755,7 @@ pub struct Tally {
     pub trading_posts: u32,
     pub longhouses: u32,
     pub fields: u32,
+    pub ruins: u32,
     /// Untouched forest in the territory: game, furs, timber.
     pub forest: u32,
     /// Untouched open land in the territory.
@@ -737,6 +775,7 @@ impl Tally {
             Building::TradingPost => self.trading_posts += 1,
             Building::Longhouse => self.longhouses += 1,
             Building::Field => self.fields += 1,
+            Building::Ruins => self.ruins += 1,
             Building::Empty => match terrain {
                 Terrain::Forest => self.forest += 1,
                 Terrain::Grass | Terrain::Sand | Terrain::Hills => self.open += 1,
@@ -882,6 +921,161 @@ fn wants(
     wants
 }
 
+// ---------------------------------------------------------------------------
+// Land value
+// ---------------------------------------------------------------------------
+
+/// What a lot in a town is worth: how much a family or a merchant would give to live
+/// and work there. Lots are dear near the market square at the town's center, on the
+/// waterfront, by the wharves and the church, and on high, dry ground. They're cheap
+/// next to smithies, tanneries and other smoky, smelly trades, and next to burnt
+/// ruins. The best lots go to houses and the church, and the trades are pushed out to
+/// the cheap ground at the edge, where they gather into a quarter of their own.
+///
+/// Native villages don't have land values: their land is held in common.
+pub struct LandValue {
+    width: usize,
+    height: usize,
+    values: Vec<Option<u8>>,
+    /// What being near the water adds to each tile, worked out on the first survey.
+    shore: Vec<u8>,
+}
+
+impl LandValue {
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            values: vec![None; width * height],
+            shore: Vec::new(),
+        }
+    }
+
+    /// The value of a town lot, from 0 to 100, or `None` outside towns.
+    pub fn get(&self, x: i32, y: i32) -> Option<u8> {
+        let inside = x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height;
+        if inside {
+            self.values[y as usize * self.width + x as usize]
+        } else {
+            None
+        }
+    }
+}
+
+/// A word for a land value, for the inspect panel.
+pub fn land_value_word(value: u8) -> &'static str {
+    match value {
+        70.. => "prime",
+        50.. => "good",
+        30.. => "middling",
+        _ => "poor",
+    }
+}
+
+/// Values every lot in every town, every three months: land values move slowly. Rather
+/// than look around every lot, each wharf, church, workshop and ruin marks the lots it
+/// touches.
+fn survey_land(world: &World, _: &mut Commands) {
+    if !world.resource::<Clock>().month.is_multiple_of(3) {
+        return;
+    }
+    let map = world.resource::<Map>();
+    let tiles = world.resource::<Tiles>();
+    let all = folks(world);
+    let positions = world.read::<Position>();
+    let centers: BTreeMap<Entity, Position> = world
+        .read::<City>()
+        .iter()
+        .filter(|(e, _)| all.get(e).is_some_and(|f| !f.villages()))
+        .filter_map(|(e, _)| positions.get(e).map(|&p| (e, p)))
+        .collect();
+    let mut land = world.resource_mut::<LandValue>();
+    let (w, h) = (map.width as i32, map.height as i32);
+    let index = |x: i32, y: i32| (x >= 0 && y >= 0 && x < w && y < h).then(|| (y * w + x) as usize);
+
+    // The shore doesn't move: work out once how close each tile is to the water.
+    if land.shore.is_empty() {
+        land.shore = vec![0; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                if !map.terrain_at(x, y).is_some_and(|t| t.is_water()) {
+                    continue;
+                }
+                for dy in -2..=2_i32 {
+                    for dx in -2..=2_i32 {
+                        if let Some(i) = index(x + dx, y + dy) {
+                            let near = if dx.abs() <= 1 && dy.abs() <= 1 {
+                                12
+                            } else {
+                                6
+                            };
+                            land.shore[i] = land.shore[i].max(near);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut marks = vec![0_i16; (w * h) as usize];
+    let mut near_wharf = vec![false; (w * h) as usize];
+    let mut near_church = vec![false; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let (reach, nuisance) = match tiles.building(x, y) {
+                Building::Wharf | Building::Church => (2, 0),
+                Building::Workshop => (1, 7),
+                Building::Ruins => (1, 6),
+                _ => continue,
+            };
+            let b = tiles.building(x, y);
+            for dy in -reach..=reach {
+                for dx in -reach..=reach {
+                    let Some(i) = index(x + dx, y + dy).filter(|_| (dx, dy) != (0, 0)) else {
+                        continue;
+                    };
+                    match b {
+                        Building::Wharf => near_wharf[i] = true,
+                        Building::Church => near_church[i] = true,
+                        _ => marks[i] -= nuisance,
+                    }
+                }
+            }
+        }
+    }
+
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let buildable = map.terrain_at(x, y).is_some_and(|t| t.buildable());
+            let Some(&center) = tiles.owner(x, y).and_then(|c| centers.get(&c)) else {
+                land.values[i] = None;
+                continue;
+            };
+            if !buildable {
+                land.values[i] = None;
+                continue;
+            }
+            let d = (center.dist2(Position { x, y }) as f32).sqrt();
+            let mut value = 30.0 + 25.0 * (1.0 - d / 12.0).max(0.0);
+            value += land.shore[i] as f32 + marks[i] as f32;
+            if near_wharf[i] {
+                value += 10.0;
+            }
+            if near_church[i] {
+                value += 8.0;
+            }
+            if map.terrain_at(x, y) == Some(Terrain::Hills) {
+                value += 5.0;
+            }
+            if tiles.touches(x, y, |b| b == Building::Road || b.is_center()) {
+                value += 5.0;
+            }
+            land.values[i] = Some(value.clamp(0.0, 100.0) as u8);
+        }
+    }
+}
+
 fn is_street(center: Position, x: i32, y: i32) -> bool {
     (x - center.x).rem_euclid(STREET_SPACING) == 0 || (y - center.y).rem_euclid(STREET_SPACING) == 0
 }
@@ -893,10 +1087,15 @@ fn is_street(center: Position, x: i32, y: i32) -> bool {
 /// Farms, plantations and trading posts spread over the countryside beyond it, and a
 /// growing town spreads over the farms at its edge. Native villages grow outward from
 /// the village, with no streets.
+///
+/// Within the core, houses and the church take the most valuable lots they can find
+/// (see [`LandValue`]) and workshops the cheapest, and burnt-out lots are built on
+/// again first.
 #[allow(clippy::too_many_arguments)]
 fn find_site(
     map: &Map,
     tiles: &Tiles,
+    land: &LandValue,
     rng: &mut Rng,
     city: Entity,
     center: Position,
@@ -918,8 +1117,11 @@ fn find_site(
             let over_farm = match tiles.building(x, y) {
                 Building::Empty => 0,
                 Building::Farm if in_town && d <= core2 + 6 => -10,
+                // The lot is laid out and the rubble is half cleared already.
+                Building::Ruins if in_town && kind != Building::Road => 6,
                 _ => continue,
             };
+            let value = land.get(x, y).unwrap_or(30) as i32;
             let wooded = matches!(terrain, Terrain::Forest | Terrain::Hills);
             // Clearing forest for crops is hard work; hills are poor soil.
             let soil = match terrain {
@@ -967,8 +1169,8 @@ fn find_site(
                         continue;
                     }
                     match kind {
-                        Building::House => -4 * d,
-                        Building::Church => -6 * d,
+                        Building::House => -4 * d + value,
+                        Building::Church => -6 * d + value,
                         Building::Wharf => {
                             let shore = NEIGHBORS_4.iter().any(|&(dx, dy)| {
                                 map.terrain_at(x + dx, y + dy).is_some_and(|t| t.is_water())
@@ -978,9 +1180,10 @@ fn find_site(
                             }
                             -d
                         }
-                        // Workshops like forests and hills, for timber and stone.
-                        _ if wooded => 40 - 2 * d,
-                        _ => -2 * d,
+                        // Workshops like forests and hills, for timber and stone, and
+                        // cheap ground away from the best houses.
+                        _ if wooded => 40 - 2 * d - value,
+                        _ => -2 * d - value,
                     }
                 }
             } + over_farm
@@ -995,7 +1198,7 @@ fn find_site(
 
 /// The squared radius of a town's core, which grows with its buildings.
 fn core2(t: &Tally) -> i32 {
-    8 + (t.houses + t.workshops + t.churches + t.wharves) as i32
+    8 + (t.houses + t.workshops + t.churches + t.wharves + t.ruins) as i32
 }
 
 /// Labor to build `kind` on `terrain`: crops planted in a forest have to clear it first.
@@ -1758,6 +1961,187 @@ fn epidemics(world: &World, _: &mut Commands) {
     }
 }
 
+/// Where fires are burning or have just burned, so they can be drawn.
+#[derive(Default)]
+pub struct Burning {
+    tiles: Vec<(Position, u32)>,
+}
+
+impl Burning {
+    /// Whether the tile burned within the last few months.
+    pub fn is_burning(&self, x: i32, y: i32) -> bool {
+        self.tiles.iter().any(|(p, _)| p.x == x && p.y == y)
+    }
+}
+
+/// How readily a town's buildings catch fire, and how readily fire spreads between them.
+fn flammability(folk: Folk, brick: bool) -> (f32, f32) {
+    if brick {
+        return (0.5, 0.1);
+    }
+    match folk.culture {
+        // Factories and Indian towns are of brick, stone and mud with flat or tiled
+        // roofs, though the poorer quarters are thatched. So are Spanish and
+        // Portuguese towns, of adobe and stone.
+        _ if folk.trade_only => (0.7, 0.18),
+        Culture::Indian | Culture::Spanish | Culture::Portuguese => (0.7, 0.18),
+        // Brick fronts, but wood behind, and wooden chimneys until they were banned.
+        Culture::Dutch | Culture::Danish => (0.8, 0.24),
+        // Timber frame, clapboard and thatch.
+        _ => (1.0, 0.35),
+    }
+}
+
+/// Spreads a fire from `start` through `city`'s buildings and returns every tile that
+/// burned. Fire spreads to the buildings next door and sometimes leaps a street; it
+/// stops at open ground, fields and other towns.
+fn burn(tiles: &Tiles, rng: &mut Rng, city: Entity, start: Position, spread: f32) -> Vec<Position> {
+    let mut burnt = vec![start];
+    let mut seen = BTreeSet::from([(start.x, start.y)]);
+    let mut frontier = VecDeque::from([start]);
+    while let Some(p) = frontier.pop_front() {
+        for (dx, dy) in NEIGHBORS_4 {
+            if burnt.len() >= MAX_FIRE {
+                return burnt;
+            }
+            let (target, chance) = if tiles.building(p.x + dx, p.y + dy) == Building::Road {
+                let across = Position {
+                    x: p.x + 2 * dx,
+                    y: p.y + 2 * dy,
+                };
+                (across, spread * STREET_JUMP)
+            } else {
+                let next = Position {
+                    x: p.x + dx,
+                    y: p.y + dy,
+                };
+                (next, spread)
+            };
+            let catches = tiles.owner(target.x, target.y) == Some(city)
+                && tiles.building(target.x, target.y).burns()
+                && !seen.contains(&(target.x, target.y));
+            if catches && rng.chance(chance) {
+                seen.insert((target.x, target.y));
+                burnt.push(target);
+                frontier.push_back(target);
+            }
+        }
+    }
+    burnt
+}
+
+/// Fires break out in towns, more often in winter when every hearth is lit, and the
+/// bigger the town the more often. Most are put out after a house or two, but on a
+/// windy night one can take a whole quarter. A colony that has lost a quarter rebuilds
+/// it in brick and stone, as Boston was ordered to after its fire of 1679. Burnt lots
+/// are cleared and built on again.
+fn fires(world: &World, _: &mut Commands) {
+    let setting = world.resource::<Rules>().0.setting;
+    let month = world.resource::<Clock>().month;
+    let map = world.resource::<Map>();
+    let all = folks(world);
+    let mut tiles = world.resource_mut::<Tiles>();
+    let mut rng = world.resource_mut::<Rng>();
+    let mut log = world.resource_mut::<EventLog>();
+    let mut burning = world.resource_mut::<Burning>();
+    let positions = world.read::<Position>();
+    let mut cities = world.write::<City>();
+
+    burning.tiles.retain(|&(_, m)| month < m + 3);
+    // What each town has that can burn, counting workshops double. Rubble left standing
+    // is carted off or grows over in a few years.
+    let mut fuels: BTreeMap<Entity, u32> = BTreeMap::new();
+    let Tiles {
+        buildings, owners, ..
+    } = &mut *tiles;
+    for (building, owner) in buildings.iter_mut().zip(owners.iter()) {
+        match *building {
+            Building::Ruins if rng.chance(1.0 / 36.0) => *building = Building::Empty,
+            b if b.burns() => {
+                if let Some(owner) = owner {
+                    let fuel = if b == Building::Workshop { 2 } else { 1 };
+                    *fuels.entry(*owner).or_default() += fuel;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (e, city) in cities.iter_mut() {
+        let (Some(&center), Some(&folk)) = (positions.get(e), all.get(&e)) else {
+            continue;
+        };
+        if folk.villages() {
+            continue;
+        }
+        let fuel = fuels.get(&e).copied().unwrap_or(0);
+        let (catch, spread) = flammability(folk, city.brick_since.is_some());
+        let latitude = era::latitude(center.y, map.height);
+        let hearths = 1.0 + 0.5 * era::winter(setting, month, latitude);
+        let chance = (fuel as f32 * IGNITION * catch * hearths).min(MAX_IGNITION);
+        if fuel == 0 || !rng.chance(chance) {
+            continue;
+        }
+        // Where it starts: any building, but forges and ovens most of all.
+        let r = MAX_TERRITORY_RADIUS;
+        let mut sources = Vec::new();
+        for y in center.y - r..=center.y + r {
+            for x in center.x - r..=center.x + r {
+                let b = tiles.building(x, y);
+                if tiles.owner(x, y) == Some(e) && b.burns() {
+                    let p = Position { x, y };
+                    sources.push(p);
+                    if b == Building::Workshop {
+                        sources.push(p);
+                    }
+                }
+            }
+        }
+        if sources.is_empty() {
+            continue;
+        }
+        let start = *rng.pick(&sources);
+        // Some nights are still and some are windy.
+        let wind = 0.6 + 0.8 * rng.unit();
+        let burnt = burn(&tiles, &mut rng, e, start, spread * wind);
+        let mut houses = 0;
+        for p in &burnt {
+            if tiles.building(p.x, p.y) == Building::House {
+                houses += 1;
+            }
+            tiles.set_building(p.x, p.y, Building::Ruins);
+            burning.tiles.push((*p, month));
+        }
+        // The stores in the burnt quarter go up with it.
+        let share = burnt.len() as f32 / fuel.max(1) as f32;
+        city.food *= 1.0 - 0.6 * share.min(1.0);
+        city.last_fire = Some((month, burnt.len() as u32));
+
+        let n = burnt.len();
+        if n >= GREAT_FIRE {
+            log.push(
+                month,
+                format!(
+                    "A great fire swept through {}: {n} buildings burned, {houses} of them houses",
+                    city.name
+                ),
+            );
+            if !folk.local() && !folk.trade_only && city.brick_since.is_none() {
+                city.brick_since = Some(month);
+                log.push(
+                    month,
+                    format!("{} is to be rebuilt in brick and stone", city.name),
+                );
+            }
+        } else if n >= 4 {
+            log.push(
+                month,
+                format!("Fire in {}: {n} buildings burned", city.name),
+            );
+        }
+    }
+}
+
 /// Towns that dwindle away are abandoned. Survivors move to the nearest town of their
 /// own people, and the land is free again.
 fn abandon_towns(world: &World, commands: &mut Commands) {
@@ -1956,6 +2340,7 @@ fn city_build(world: &World, _: &mut Commands) {
     let setting = world.resource::<Rules>().0.setting;
     let map = world.resource::<Map>();
     let mut tiles = world.resource_mut::<Tiles>();
+    let land = world.resource::<LandValue>();
     let mut rng = world.resource_mut::<Rng>();
     let all = folks(world);
     let positions = world.read::<Position>();
@@ -1980,26 +2365,39 @@ fn city_build(world: &World, _: &mut Commands) {
                     break 'rounds;
                 }
                 let core = core2(t);
-                let site = find_site(&map, &tiles, &mut rng, e, center, core, want)
+                let site = find_site(&map, &tiles, &land, &mut rng, e, center, core, want)
                     .map(|site| (want, site))
                     .or_else(|| {
                         if folk.villages() {
                             return None;
                         }
-                        find_site(&map, &tiles, &mut rng, e, center, core, Building::Road)
-                            .map(|site| (Building::Road, site))
+                        find_site(
+                            &map,
+                            &tiles,
+                            &land,
+                            &mut rng,
+                            e,
+                            center,
+                            core,
+                            Building::Road,
+                        )
+                        .map(|site| (Building::Road, site))
                     });
                 let Some((kind, site)) = site else {
                     continue;
                 };
                 let terrain = map.terrain_at(site.x, site.y);
-                let cost = build_cost(kind, terrain);
+                let old = tiles.building(site.x, site.y);
+                let clearing = if old == Building::Ruins { 4.0 } else { 0.0 };
+                let cost = build_cost(kind, terrain) + clearing;
                 if city.labor < cost {
                     break 'rounds;
                 }
                 city.labor -= cost;
-                if tiles.building(site.x, site.y) == Building::Farm {
-                    t.farms -= 1;
+                match old {
+                    Building::Farm => t.farms -= 1,
+                    Building::Ruins => t.ruins -= 1,
+                    _ => {}
                 }
                 tiles.set_building(site.x, site.y, kind);
                 t.add(kind, terrain.unwrap_or(Terrain::Grass));
@@ -2010,7 +2408,75 @@ fn city_build(world: &World, _: &mut Commands) {
                 break;
             }
         }
+        if !folk.villages() && rng.chance(RELOCATE_CHANCE) {
+            relocate_trade(&map, &mut tiles, &land, &mut rng, e, center, city, t);
+        }
     }
+}
+
+/// The trades move out of the best quarters as a town grows up around them: the
+/// smithy or tannery on the town's dearest workshop lot sells up and builds again on
+/// cheap ground at the edge, and the lot it leaves goes to houses.
+#[allow(clippy::too_many_arguments)]
+fn relocate_trade(
+    map: &Map,
+    tiles: &mut Tiles,
+    land: &LandValue,
+    rng: &mut Rng,
+    e: Entity,
+    center: Position,
+    city: &mut City,
+    t: &mut Tally,
+) {
+    let r = MAX_TERRITORY_RADIUS;
+    let mut dearest: Option<(u8, Position)> = None;
+    for y in center.y - r..=center.y + r {
+        for x in center.x - r..=center.x + r {
+            if tiles.owner(x, y) != Some(e) || tiles.building(x, y) != Building::Workshop {
+                continue;
+            }
+            if let Some(value) = land.get(x, y) {
+                if dearest.is_none_or(|(v, _)| value > v) {
+                    dearest = Some((value, Position { x, y }));
+                }
+            }
+        }
+    }
+    let Some((value, from)) = dearest.filter(|&(v, _)| v >= RELOCATE_VALUE) else {
+        return;
+    };
+    let Some(to) = find_site(
+        map,
+        tiles,
+        land,
+        rng,
+        e,
+        center,
+        core2(t),
+        Building::Workshop,
+    ) else {
+        return;
+    };
+    if land.get(to.x, to.y).unwrap_or(30) + RELOCATE_GAIN > value {
+        return;
+    }
+    let old = tiles.building(to.x, to.y);
+    let terrain = map.terrain_at(to.x, to.y);
+    let clearing = if old == Building::Ruins { 4.0 } else { 0.0 };
+    let cost = build_cost(Building::Workshop, terrain) + clearing;
+    if city.labor < cost {
+        return;
+    }
+    city.labor -= cost;
+    match old {
+        Building::Farm => t.farms -= 1,
+        Building::Ruins => t.ruins -= 1,
+        _ => {}
+    }
+    tiles.set_building(to.x, to.y, Building::Workshop);
+    tiles.set_building(from.x, from.y, Building::Empty);
+    let freed = map.terrain_at(from.x, from.y).unwrap_or(Terrain::Grass);
+    t.add(Building::Empty, freed);
 }
 
 /// Borders grow with population.
@@ -2470,6 +2936,8 @@ impl Simulation {
         let mut rng = Rng::new(seed);
         let starts = pick_starts(&map, &mut rng, scenario.nations.len());
         world.insert_resource(Tiles::new(map.width, map.height));
+        world.insert_resource(LandValue::new(map.width, map.height));
+        world.insert_resource(Burning::default());
         world.insert_resource(Ocean::new(&map, scenario.sea_lanes));
         world.insert_resource(map);
         world.insert_resource(rng);
@@ -2482,9 +2950,11 @@ impl Simulation {
             .with("monsoon", monsoon)
             .with("city_economy", city_economy)
             .with("epidemics", epidemics)
+            .with("fires", fires)
             .with("abandon_towns", abandon_towns)
             .with("migrate", migrate)
             .with("train_settlers", train_settlers)
+            .with("survey_land", survey_land)
             .with("city_build", city_build)
             .with("expand_territory", expand_territory)
             .with("move_settlers", move_settlers)
@@ -2519,7 +2989,16 @@ impl Simulation {
         world.resource_mut::<Clock>().month = 0;
         world.resource_mut::<EventLog>().entries.clear();
         world.resource_mut::<Drought>().area = None;
+        // Start the clock with the towns standing whole.
+        world.resource_mut::<Burning>().tiles.clear();
+        for building in world.resource_mut::<Tiles>().buildings.iter_mut() {
+            if *building == Building::Ruins {
+                *building = Building::Empty;
+            }
+        }
         for (_, city) in world.write::<City>().iter_mut() {
+            city.brick_since = None;
+            city.last_fire = None;
             city.founded = None;
             city.outbreak = None;
             city.immune_until = 0;
@@ -2655,6 +3134,9 @@ impl Simulation {
             let name = owner_civ.map_or(building.name(), |c| c.building_name(building));
             out += &format!(" · {name}");
         }
+        if let Some(value) = self.world.resource::<LandValue>().get(x, y) {
+            out += &format!("\nLand value {value} · {}", land_value_word(value));
+        }
 
         let Some(city_entity) = tiles.owner(x, y) else {
             out += "\nUnclaimed land";
@@ -2713,6 +3195,7 @@ impl Simulation {
                 (t.trading_posts, Building::TradingPost),
                 (t.wharves, Building::Wharf),
                 (t.churches, Building::Church),
+                (t.ruins, Building::Ruins),
             ] {
                 if n > 0 {
                     parts.push(format!("{n} × {}", civ.building_name(b).to_lowercase()));
@@ -2720,6 +3203,15 @@ impl Simulation {
             }
             format!("\n{}", parts.join(" · "))
         };
+        if let Some(since) = city.brick_since {
+            out += &format!("\nBuilding in brick and stone since {}", era::year(since));
+        }
+        if let Some((month, burned)) = city.last_fire {
+            out += &format!(
+                "\nLast fire {}: {burned} buildings burned",
+                era::year(month)
+            );
+        }
         if city.starving {
             out += "\nStarving: the food stores are empty";
         }
@@ -3036,6 +3528,7 @@ impl Simulation {
                             Building::Workshop => (6, 'w'),
                             Building::TradingPost => (6, 't'),
                             Building::House => (5, 'h'),
+                            Building::Ruins => (5, 'x'),
                             Building::Longhouse => (5, 'L'),
                             Building::Plantation => (4, 'p'),
                             Building::Farm => (4, 'f'),
@@ -3257,6 +3750,89 @@ mod tests {
             }
         }
         assert!(in_town > 0, "no colonial buildings after 50 years");
+    }
+
+    /// Two towns side by side: `a` holds x 0..6 and `b` x 6..10. Each has rows of houses
+    /// with a street down x = 3 and along y = 3.
+    fn two_towns() -> (Tiles, Entity, Entity) {
+        let mut world = World::new();
+        let (a, b) = (world.spawn(()), world.spawn(()));
+        let mut tiles = Tiles::new(10, 6);
+        for y in 0..6 {
+            for x in 0..10 {
+                tiles.take(x, y, if x < 6 { a } else { b });
+                let street = x == 3 || y == 3;
+                let b = if street {
+                    Building::Road
+                } else {
+                    Building::House
+                };
+                tiles.set_building(x, y, b);
+            }
+        }
+        (tiles, a, b)
+    }
+
+    #[test]
+    fn fire_leaps_streets_but_stays_in_its_town() {
+        let (tiles, a, _) = two_towns();
+        let mut rng = Rng::new(1);
+        let start = Position { x: 1, y: 1 };
+        // A windless night: the fire is put out where it started.
+        assert_eq!(burn(&tiles, &mut rng, a, start, 0.0), vec![start]);
+        // A gale: every house in the town goes, across both streets, but nothing in
+        // the town next door, and the streets themselves don't burn.
+        let burnt = burn(&tiles, &mut rng, a, start, 1.0 / STREET_JUMP);
+        let houses_in_a = (0..6)
+            .flat_map(|y| (0..6).map(move |x| (x, y)))
+            .filter(|&(x, y)| tiles.building(x, y) == Building::House)
+            .count();
+        assert_eq!(burnt.len(), houses_in_a);
+        for p in &burnt {
+            assert!(p.x < 6, "fire spread to the next town at {p:?}");
+            assert_eq!(tiles.building(p.x, p.y), Building::House);
+        }
+    }
+
+    #[test]
+    fn towns_burn_and_sort_their_land() {
+        let mut sim = Simulation::new(MAP_WIDTH, MAP_HEIGHT, 1);
+        run(&mut sim, 12 * 100);
+        let burned = sim
+            .world
+            .read::<City>()
+            .iter()
+            .filter(|(_, c)| c.last_fire.is_some())
+            .count();
+        assert!(burned > 0, "no town has had a fire in a century");
+
+        // Houses get the dear lots and the trades the cheap ones.
+        let tiles = sim.world.resource::<Tiles>();
+        let land = sim.world.resource::<LandValue>();
+        let mean = |kind: Building| {
+            let values: Vec<f32> = (0..MAP_HEIGHT as i32)
+                .flat_map(|y| (0..MAP_WIDTH as i32).map(move |x| (x, y)))
+                .filter(|&(x, y)| tiles.building(x, y) == kind)
+                .filter_map(|(x, y)| land.get(x, y))
+                .map(f32::from)
+                .collect();
+            assert!(!values.is_empty(), "no {kind:?}");
+            values.iter().sum::<f32>() / values.len() as f32
+        };
+        let (houses, workshops) = (mean(Building::House), mean(Building::Workshop));
+        assert!(
+            houses > workshops + 3.0,
+            "houses {houses:.1}, workshops {workshops:.1}"
+        );
+        // Villages don't have land values.
+        let villages = sim.world.read::<Position>();
+        let all = folks(&sim.world);
+        for (e, _) in sim.world.read::<City>().iter() {
+            if all.get(&e).is_some_and(|f| f.villages()) {
+                let p = villages.get(e).unwrap();
+                assert_eq!(land.get(p.x + 1, p.y), None);
+            }
+        }
     }
 
     #[test]
