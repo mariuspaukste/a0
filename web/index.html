@@ -50,6 +50,12 @@
     canvas.chart { position: static; width: 100%; height: 120px; cursor: default; touch-action: auto; display: block; margin: 4px 0 2px; }
     .legend { font-size: 11px; color: #99a; }
     .legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin: 0 4px 0 8px; }
+    #compare { display: none; background: #1d2540; border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; font-size: 12px; color: #ccd; }
+    #compare.viewing { outline: 1px solid #9fc3ff; }
+    #compare button { margin-top: 4px; }
+    .alt { color: #9fc3ff; font-size: 12px; }
+    .legend i.dash { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px) !important; }
+    #readout { font-size: 12px; color: #ccd; min-height: 16px; margin: 4px 0 2px; }
     details { margin-top: 8px; color: #ccd; }
     details p { font-size: 12px; color: #aab; margin: 4px 0; }
     table.matrix td { font-size: 11px; text-align: right; padding: 1px 3px; font-variant-numeric: tabular-nums; }
@@ -70,6 +76,7 @@
   <div class="panel" id="side">
     <header><h1 id="title">a0</h1><button id="toggle">▾</button></header>
     <div id="date">Loading…</div>
+    <div id="compare"><div id="cmptext"></div><button id="cmpview">Show the unchanged world</button></div>
     <div class="controls" id="speeds"></div>
     <div class="controls" id="scenarios"></div>
     <div class="controls"><button id="landvalue" title="Color town lots by what they're worth">Land value</button></div>
@@ -102,9 +109,10 @@
         <h2 id="econyear">India</h2>
         <div id="headline"></div>
         <canvas class="chart" id="popchart"></canvas>
-        <div class="legend">Population<i style="background:#7fd0ff"></i>this timeline<i style="background:#888"></i>Maddison</div>
+        <div class="legend">Population<i style="background:#7fd0ff"></i>yours<i class="dash" style="color:#7fd0ff"></i>unchanged<i style="background:#888"></i>Maddison</div>
         <canvas class="chart" id="gdpchart"></canvas>
-        <div class="legend">GDP, 1990 dollars<i style="background:#ffd76a"></i>this timeline<i style="background:#888"></i>Maddison</div>
+        <div class="legend">GDP, 1990 dollars<i style="background:#ffd76a"></i>yours<i class="dash" style="color:#ffd76a"></i>unchanged<i style="background:#888"></i>Maddison</div>
+        <div id="readout" class="hint">Tap a chart to read off a year.</div>
         <h2>States</h2>
         <div id="states"></div>
         <h2>Output by sector</h2>
@@ -180,7 +188,8 @@
           wasm.init(seed, canvas.width, canvas.height, scenario);
           wasm.set_overlay(overlay);
           $("seed").textContent = seed;
-          whatifKey = ""; seriesYears = -1; series = [];
+          whatifKey = ""; seriesYears = -1; series = []; markYear = null; viewing = false;
+          $("readout").textContent = "Tap a chart to read off a year.";
           $("chronicle").innerHTML = "Real events appear here as their dates come. ✓ as in history · ≠ went differently · ✗ didn't happen · ★ your change";
           showMatrix();
           $("tile").textContent = "Tap a tile to inspect it, or a ship or settlers to give them orders.";
@@ -310,14 +319,21 @@
         const b = document.createElement("button");
         b.className = "whatif";
         b.innerHTML = `${esc(title)}<small>${esc(about)}${place === "1" ? " Tap the map first to pick the place." : ""}</small>`;
-        b.onclick = () => { if (ready) { wasm.change_history(+i); whatifKey = ""; updatePanel(); } };
+        b.onclick = () => {
+          if (!ready) return;
+          // The first change also builds the world without your changes, which takes
+          // a moment: say so first.
+          if ($("compare").style.display !== "block") $("say2").textContent = "Changing history…";
+          setTimeout(() => { wasm.change_history(+i); whatifKey = ""; updatePanel(); }, 20);
+        };
         box.append(b);
       }
     }
 
     // Line charts of the timeline against Maddison's estimates.
-    let seriesYears = -1, series = [];
-    function chart(canvas, rows, sim, real, color) {
+    let seriesYears = -1, seriesBehind = -1, series = [], markYear = null;
+    const big = v => v >= 1e9 ? `${(v / 1e9).toFixed(1)} bn` : `${Math.round(v / 1e6)} m`;
+    function chart(canvas, rows, sim, real, other, color) {
       const s = dpr();
       const w = canvas.clientWidth * s, h = canvas.clientHeight * s;
       if (!w || !h) return;
@@ -327,7 +343,7 @@
       if (rows.length < 2) return;
       const pad = 4 * s, left = 34 * s, bottom = 14 * s;
       const x0 = rows[0][0], x1 = Math.max(rows[rows.length - 1][0], x0 + 1);
-      const top = Math.max(...rows.map(r => Math.max(r[sim], r[real]))) * 1.08;
+      const top = Math.max(...rows.map(r => Math.max(r[sim], r[real], r[other]))) * 1.08;
       const X = x => left + (x - x0) / (x1 - x0) * (w - left - pad);
       const Y = y => h - bottom - y / top * (h - bottom - pad);
       g.fillStyle = "#889"; g.font = `${10 * s}px system-ui`;
@@ -341,17 +357,47 @@
       g.textAlign = "center";
       g.fillText(x0, X(x0) + 10 * s, h - 2 * s);
       g.fillText(rows[rows.length - 1][0], X(x1) - 10 * s, h - 2 * s);
-      for (const [k, col, width] of [[real, "#888", 1.5], [sim, color, 2]]) {
+      canvas.geom = { left: left / s, right: (w - pad) / s, x0, x1 };
+      for (const [k, col, width, dash] of [[real, "#888", 1.5, []], [other, color, 1.5, [4, 3]], [sim, color, 2, []]]) {
         g.strokeStyle = col; g.lineWidth = width * s;
+        g.setLineDash(dash.map(d => d * s));
         g.beginPath();
-        rows.forEach((r, i) => i ? g.lineTo(X(r[0]), Y(r[k])) : g.moveTo(X(r[0]), Y(r[k])));
+        let on = false;
+        for (const r of rows) {
+          // The unchanged timeline only has figures from your first change on.
+          if (r[k] < 0) { on = false; continue; }
+          on ? g.lineTo(X(r[0]), Y(r[k])) : g.moveTo(X(r[0]), Y(r[k]));
+          on = true;
+        }
         g.stroke();
       }
+      g.setLineDash([]);
+      if (markYear !== null && markYear >= x0 && markYear <= x1) {
+        g.strokeStyle = "rgba(255,255,255,0.5)"; g.lineWidth = s;
+        g.beginPath(); g.moveTo(X(markYear), pad); g.lineTo(X(markYear), h - bottom); g.stroke();
+      }
     }
+    // Tapping a chart reads off that year's figures.
+    function readYear(e) {
+      const geom = e.currentTarget.geom;
+      if (!geom || !series.length) return;
+      const x = e.clientX - e.currentTarget.getBoundingClientRect().left;
+      const t = Math.min(1, Math.max(0, (x - geom.left) / (geom.right - geom.left)));
+      const year = Math.round(geom.x0 + t * (geom.x1 - geom.x0));
+      const r = series.reduce((a, b) => Math.abs(b[0] - year) < Math.abs(a[0] - year) ? b : a);
+      markYear = r[0];
+      const unchanged = v => v >= 0 ? ` · unchanged ${big(v)}` : "";
+      $("readout").innerHTML =
+        `<b>${r[0]}</b> · population ${big(r[1])}${unchanged(r[5])} · Maddison ${big(r[2])}<br>` +
+        `GDP $${big(r[3])}${unchanged(r[6])} · Maddison $${big(r[4])}`;
+      drawCharts();
+    }
+    $("popchart").addEventListener("click", readYear);
+    $("gdpchart").addEventListener("click", readYear);
     function drawCharts() {
       if (tab !== "economy") return;
-      chart($("popchart"), series, 1, 2, "#7fd0ff");
-      chart($("gdpchart"), series, 3, 4, "#ffd76a");
+      chart($("popchart"), series, 1, 2, 5, "#7fd0ff");
+      chart($("gdpchart"), series, 3, 4, 6, "#ffd76a");
     }
     addEventListener("resize", () => { seriesYears = -1; });
 
@@ -362,9 +408,11 @@
         if (kind === "sector") sectors.push(f);
         if (kind === "state") states.push(f);
         if (kind === "chron") {
-          const [outcome, year, title, text, real] = f;
+          const [outcome, year, title, text, real, theirs, theirText] = f;
           const note = outcome === "you" ? "" : `<div class=real>In history: ${esc(real)}</div>`;
-          chron += `<div class="chron ${outcome}"><b>${year} · ${esc(title)}</b><div>${esc(text)}</div>${note}</div>`;
+          const marks = { same: "✓", diff: "≠", none: "✗" };
+          const alt = theirs ? `<div class=alt>Without your changes: ${marks[theirs]} ${esc(theirText)}</div>` : "";
+          chron += `<div class="chron ${outcome}"><b>${year} · ${esc(title)}</b><div>${esc(text)}</div>${alt}${note}</div>`;
         }
         if (kind === "next") next += `<div>${f[0]} · ${esc(f[1])}</div>`;
         if (kind === "whatif") whatifs.push(f);
@@ -380,12 +428,14 @@
       $("econ").style.display = econ ? "block" : "none";
       $("noecon").style.display = econ ? "none" : "block";
       if (!econ || tab !== "economy") return;
-      const [year, pop, realPop, gdp, realGdp, perHead, consumption, fed, exports, tribute] = econ;
+      const [year, pop, realPop, gdp, realGdp, perHead, consumption, fed, exports, tribute, uPop, uGdp] = econ;
       $("econyear").textContent = `India, ${year}`;
-      const stat = (label, value, real) =>
-        `<div class=stat><span>${label}</span><span>${value}${real ? ` <span class=real-num>(real ${real})</span>` : ""}</span></div>`;
+      const stat = (label, value, real, unchanged) => {
+        const notes = [unchanged && `unchanged ${unchanged}`, real && `real ${real}`].filter(Boolean).join(" · ");
+        return `<div class=stat><span>${label}</span><span>${value}${notes ? ` <span class=real-num>(${notes})</span>` : ""}</span></div>`;
+      };
       $("headline").innerHTML =
-        stat("Population", pop, realPop) + stat("GDP", `$${gdp}`, `$${realGdp}`) +
+        stat("Population", pop, realPop, uPop) + stat("GDP", `$${gdp}`, `$${realGdp}`, uGdp && `$${uGdp}`) +
         stat("GDP per head", `$${perHead}`) + stat("Spent by households, per head", `$${consumption}`) +
         stat("Food needs met", `${fed}%`) + stat("Cloth exported", `$${exports}`) +
         (tribute !== "0" ? stat("Revenue taken by the Company", `$${tribute}`) : "");
@@ -394,8 +444,9 @@
           `<tr><td><span class=swatch style="background:${color}"></span>${esc(name)}</td><td class=n>${p}</td><td class=n>$${g}</td><td class=n>$${ph}</td><td class=n>${fd}%</td></tr>`).join("") +
         `</table>`;
       $("sectors").innerHTML = sectors.map(([name, out]) => stat(esc(name), `$${out}`)).join("");
-      if (+year !== seriesYears) {
+      if (+year !== seriesYears || behind !== seriesBehind) {
         seriesYears = +year;
+        seriesBehind = behind;
         series = text(wasm.series_text()).split("\n").filter(Boolean).map(l => l.split("\t").map(Number));
         drawCharts();
       }
@@ -411,9 +462,30 @@
       html += `<tr><td>Multiplier</td>${rows.map(r => `<td>${r[7]}</td>`).join("")}</tr>`;
       $("matrix").innerHTML = html;
     }
+    // Once you change history, the unchanged timeline replays in the background and
+    // then runs alongside yours. You can look at its world on the map.
+    let viewing = false, behind = 0;
+    function showCompare(cmp) {
+      $("compare").style.display = cmp ? "block" : "none";
+      if (!cmp) { behind = 0; return; }
+      const [year, left] = cmp;
+      behind = +left;
+      $("compare").classList.toggle("viewing", viewing);
+      const replay = behind > 0 ? ` Replaying the world without your changes: ${Math.ceil(behind / 12)} years to go.` : "";
+      $("cmptext").textContent = viewing
+        ? `Showing the world as it would be without your changes.${replay}`
+        : `You changed history in ${year}.${replay || " The world without your changes runs alongside yours."}`;
+      $("cmpview").textContent = viewing ? "Back to your world" : "Show the unchanged world";
+    }
+    $("cmpview").onclick = () => {
+      if (!ready) return;
+      viewing = !viewing;
+      wasm.view_unchanged(viewing ? 1 : 0);
+      updatePanel();
+    };
     function updatePanel() {
       const rows = text(wasm.panel_text()).split("\n").filter(Boolean).map(l => l.split("\t"));
-      let heads = ["", ""], groups = [[], []], events = "", tile = null, unit = null, say = "";
+      let heads = ["", ""], groups = [[], []], events = "", tile = null, unit = null, say = "", cmp = null;
       for (const [kind, ...f] of rows) {
         if (kind === "date") $("date").textContent = f[0];
         if (kind === "title") $("title").textContent = `a0 · ${f[0]}`;
@@ -429,7 +501,9 @@
         if (kind === "tile") tile = f[0].replaceAll("|", "\n");
         if (kind === "unit") unit = f[0].replaceAll("|", "\n");
         if (kind === "say") say = f[0];
+        if (kind === "cmp") cmp = f;
       }
+      showCompare(cmp);
       $("civs").innerHTML = groups.map((rows, i) =>
         `<h2>${esc(heads[i])}</h2><table><tr><td></td><td class=n>towns</td><td class=n>people</td></tr>${rows.join("")}</table>`).join("");
       $("events").innerHTML = events;
@@ -455,7 +529,7 @@
       }
     }
 
-    let last = performance.now(), pending = 0, lastPanel = 0;
+    let last = performance.now(), pending = 0, lastPanel = 0, catchUp = 2;
     function frame(now) {
       const dt = Math.min(0.25, (now - last) / 1000);
       last = now;
@@ -464,6 +538,14 @@
         pending += dt * speeds[speed][1];
         const months = Math.floor(pending);
         if (months > 0) { wasm.step(months); pending -= months; }
+        // Replay the unchanged timeline a few months a frame, keeping each frame
+        // under about 8 ms whatever the device.
+        if (behind > 0) {
+          const t0 = performance.now();
+          behind = wasm.catch_up(catchUp);
+          const took = performance.now() - t0;
+          catchUp = took < 4 ? Math.min(120, catchUp * 2) : took > 8 ? Math.max(1, Math.floor(catchUp / 2)) : catchUp;
+        }
 
         const ptr = wasm.render();
         const pixels = new Uint8ClampedArray(wasm.memory.buffer, ptr, canvas.width * canvas.height * 4);

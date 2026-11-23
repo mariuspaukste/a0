@@ -623,9 +623,23 @@ impl EventLog {
 }
 
 /// A failed monsoon: this year's harvest within the area will be poor.
-#[derive(Default)]
 pub struct Drought {
+    /// The centre and squared radius of the area.
     pub area: Option<(Position, i32)>,
+    /// The share of a usual harvest that still comes in there.
+    pub keep: f32,
+}
+
+/// What a failed monsoon leaves of the harvest.
+pub const DROUGHT_KEEP: f32 = 0.2;
+
+impl Default for Drought {
+    fn default() -> Self {
+        Self {
+            area: None,
+            keep: DROUGHT_KEEP,
+        }
+    }
 }
 
 /// Sailing distances from the edges of the map that ships arrive from, to every
@@ -1753,7 +1767,10 @@ fn city_economy(world: &World, _: &mut Commands) {
     let harvest_month = world.resource::<Rules>().0.harvest_month;
     let map = world.resource::<Map>();
     let tallies = tally(&map, &world.resource::<Tiles>());
-    let drought = world.resource::<Drought>().area;
+    let (drought, keep) = {
+        let d = world.resource::<Drought>();
+        (d.area, d.keep)
+    };
     let month = world.resource::<Clock>().month;
     let all = folks(world);
     let locals = local_towns(world, &all);
@@ -1782,7 +1799,7 @@ fn city_economy(world: &World, _: &mut Commands) {
             + t.fishing(by_water(&map, pos), pop) * (1.0 - 0.4 * winter);
         if month % 12 == harvest_month {
             let failed = drought.is_some_and(|(c, r2)| c.dist2(pos) <= r2);
-            income += t.harvest(growing) * if failed { 0.2 } else { 1.0 };
+            income += t.harvest(growing) * if failed { keep } else { 1.0 };
         }
         if folk.trade_only {
             income += people;
@@ -1905,6 +1922,7 @@ fn monsoon(world: &World, _: &mut Commands) {
     let (center, name) = rng.pick(&towns).clone();
     let r = rng.range(20, 38);
     drought.area = Some((center, r * r));
+    drought.keep = DROUGHT_KEEP;
     world.resource_mut::<EventLog>().push(
         month,
         format!("The monsoon has failed around {name}: the crops are withering"),

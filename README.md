@@ -49,6 +49,16 @@ there is no Nawab to fight at Plassey, and no Company Raj follows. The chronicle
 each event ✓ as in history, ≠ went differently, ✗ didn't happen (and why), or ★ your
 change, next to what really happened.
 
+When you first change history, a second copy of the world starts from the same seed
+and is left alone. It replays the years already played in the background, then keeps
+pace with yours. The chronicle shows what happened there when it went differently, the
+charts draw it as a dashed line, and **Show the unchanged world** puts it on the map.
+Small chances (a fire, a failed monsoon, an epidemic) also fall differently once the
+two worlds part, so not every difference comes from your change.
+
+The great famines are calibrated to the usual death tolls: some 7.4 million in Gujarat
+and the Deccan in 1630–32, and seven to ten million in Bengal in 1770.
+
 ## Economy
 
 Each December the **Economy** tab adds up every Indian state with a Leontief
@@ -64,8 +74,8 @@ leaves as cloth shipped home.
 
 Totals are scaled so 1600 matches Angus Maddison's estimates for India (135 million
 people, $74 billion in 1990 dollars), and the charts set the timeline against his
-figures for later years. The input coefficients are round, illustrative numbers, not
-estimates for any real year.
+figures for later years. Tap a chart to read off a year. The input coefficients are
+round, illustrative numbers, not estimates for any real year.
 
 ## Towns
 
@@ -101,6 +111,7 @@ to pick it (it's ringed in gold and its route is dotted), then tap where it shou
 | `src/ecs.rs` | A from-scratch Entity-Component-System: entities, sparse-set storages, resources, commands, schedule |
 | `src/era.rs` | The historical settings: peoples, powers, arrival dates, real towns and places, names, calendar and climate |
 | `src/history.rs` | Real history as a timeline of events with conditions and effects, the player's what-ifs, and the chronicle |
+| `src/timelines.rs` | Your timeline and the unchanged one, replayed from the same seed after your first change |
 | `src/economy.rs` | The yearly input–output (Leontief) accounts: output by sector, GDP, food, exports, Company revenue |
 | `src/world.rs` | Terrain: noise-generated continents, and the map of India |
 | `src/sim.rs` | Components, resources and the systems that run every month, plus orders for units |

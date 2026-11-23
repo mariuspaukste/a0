@@ -11,6 +11,7 @@ use crate::era::{self, Setting};
 use crate::history::{self, Outcome};
 use crate::render::{self, Camera, Framebuffer, Overlay};
 use crate::sim::{format_date, group, Position, Simulation};
+use crate::timelines::Timelines;
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -19,7 +20,10 @@ extern "C" {
 }
 
 struct App {
-    sim: Simulation,
+    /// Your timeline, and once you change history, the unchanged one.
+    t: Timelines,
+    /// Whether the map and the World tab show the unchanged timeline.
+    unchanged_view: bool,
     camera: Camera,
     fb: Framebuffer,
     selected: Option<(i32, i32)>,
@@ -45,6 +49,14 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> R {
     })
 }
 
+/// The timeline on the map: yours, or the unchanged one when the player looks at it.
+fn shown(t: &Timelines, unchanged_view: bool) -> &Simulation {
+    match &t.unchanged {
+        Some(u) if unchanged_view => u,
+        _ => &t.yours,
+    }
+}
+
 /// Stores `text` and returns its length; the page then reads it at `text_ptr()`.
 fn hand_over(app: &mut App, text: String) -> usize {
     app.text = text;
@@ -63,11 +75,12 @@ pub extern "C" fn init(seed: u32, width: u32, height: u32, scenario: u32) {
     } else {
         Setting::NewWorld
     };
-    let sim = Simulation::scenario(setting, seed as u64);
+    let t = Timelines::new(setting, seed as u64);
     let fb = Framebuffer::new(width as usize, height as usize);
-    let camera = Camera::fit(sim.width(), sim.height(), &fb);
+    let camera = Camera::fit(t.yours.width(), t.yours.height(), &fb);
     let app = App {
-        sim,
+        t,
+        unchanged_view: false,
         camera,
         fb,
         selected: None,
@@ -87,10 +100,8 @@ pub extern "C" fn resize(width: u32, height: u32) {
 #[no_mangle]
 pub extern "C" fn step(months: u32) {
     with_app(|app| {
-        for _ in 0..months {
-            app.sim.step_month();
-        }
-        if app.unit.is_some_and(|u| !app.sim.unit_exists(u)) {
+        app.t.step(months);
+        if app.unit.is_some_and(|u| !app.t.yours.unit_exists(u)) {
             app.unit = None;
             app.message.clear();
         }
@@ -102,11 +113,11 @@ pub extern "C" fn step(months: u32) {
 pub extern "C" fn render() -> *const u32 {
     with_app(|app| {
         render::render(
-            &app.sim,
+            shown(&app.t, app.unchanged_view),
             &app.camera,
             &mut app.fb,
             app.selected,
-            app.unit,
+            app.unit.filter(|_| !app.unchanged_view),
             app.overlay,
         );
         app.fb.pixels.as_ptr()
@@ -145,14 +156,19 @@ pub extern "C" fn tap(x: f32, y: f32, reach: f32) -> u32 {
     with_app(|app| {
         let (tx, ty) = app.camera.to_tile(x, y, &app.fb);
         let radius = (reach / app.camera.zoom).max(0.8);
-        let under_finger = app.sim.unit_near(tx, ty, radius);
-        if let Some(unit) = app.unit.filter(|&u| app.sim.unit_exists(u)) {
+        // Units in the unchanged timeline can't be given orders: it's left alone.
+        let mine = !app.unchanged_view;
+        let under_finger = app.t.yours.unit_near(tx, ty, radius).filter(|_| mine);
+        if let Some(unit) = app.unit.filter(|&u| mine && app.t.yours.unit_exists(u)) {
             if under_finger == Some(unit) {
                 app.unit = None;
                 app.message.clear();
                 return 3;
             }
-            app.message = app.sim.order(unit, tx.floor() as i32, ty.floor() as i32);
+            app.message = app
+                .t
+                .yours
+                .order(unit, tx.floor() as i32, ty.floor() as i32);
             return 2;
         }
         if let Some(unit) = under_finger {
@@ -163,8 +179,8 @@ pub extern "C" fn tap(x: f32, y: f32, reach: f32) -> u32 {
         let tile = (tx.floor() as i32, ty.floor() as i32);
         let on_map = tile.0 >= 0
             && tile.1 >= 0
-            && (tile.0 as usize) < app.sim.width()
-            && (tile.1 as usize) < app.sim.height();
+            && (tile.0 as usize) < app.t.yours.width()
+            && (tile.1 as usize) < app.t.yours.height();
         app.selected = on_map.then_some(tile);
         if on_map {
             0
@@ -188,7 +204,7 @@ pub extern "C" fn release_unit() {
 pub extern "C" fn automate() {
     with_app(|app| {
         if let Some(unit) = app.unit {
-            app.sim.automate(unit);
+            app.t.yours.automate(unit);
             app.message = "Back on automatic.".to_string();
         }
     });
@@ -200,7 +216,25 @@ pub extern "C" fn automate() {
 pub extern "C" fn change_history(i: u32) {
     with_app(|app| {
         let at = app.selected.map(|(x, y)| Position { x, y });
-        app.message = app.sim.change_history(i as usize, at);
+        app.message = app.t.change_history(i as usize, at);
+    });
+}
+
+/// Replays up to `months` months of the unchanged timeline, after your first change.
+/// Returns how many months it still has to go.
+#[no_mangle]
+pub extern "C" fn catch_up(months: u32) -> u32 {
+    with_app(|app| app.t.catch_up(months))
+}
+
+/// Shows the unchanged timeline on the map and in the World tab (1), or yours (0).
+#[no_mangle]
+pub extern "C" fn view_unchanged(on: u32) {
+    with_app(|app| {
+        app.unchanged_view = on == 1 && app.t.unchanged.is_some();
+        if app.unchanged_view {
+            app.unit = None;
+        }
     });
 }
 
@@ -216,26 +250,31 @@ pub extern "C" fn text_ptr() -> *const u8 {
 /// - `event<TAB>text`
 /// - `tile<TAB>description` and `unit<TAB>description`, with line breaks replaced by `|`
 /// - `say<TAB>reply to the last order`
+/// - `cmp<TAB>year of your first change<TAB>months the unchanged timeline is behind
+///   <TAB>showing it (1 or 0)`, once you have changed history
 /// - `econ<TAB>year<TAB>population<TAB>real population<TAB>GDP<TAB>real GDP<TAB>GDP per
-///   head<TAB>consumption per head<TAB>% fed<TAB>exports<TAB>Company revenue`, for the
-///   last year added up
+///   head<TAB>consumption per head<TAB>% fed<TAB>exports<TAB>Company revenue<TAB>population
+///   unchanged<TAB>GDP unchanged`, for the last year added up (the last two are empty
+///   until the unchanged timeline has got there)
 /// - `sector<TAB>name<TAB>gross output`
 /// - `state<TAB>#rrggbb<TAB>name<TAB>population<TAB>GDP<TAB>per head<TAB>% fed`
-/// - `chron<TAB>outcome<TAB>year<TAB>title<TAB>what happened<TAB>real history`, newest
-///   first; outcome is `same`, `diff`, `none` or `you`
+/// - `chron<TAB>outcome<TAB>year<TAB>title<TAB>what happened<TAB>real history<TAB>outcome
+///   unchanged<TAB>what happened unchanged`, newest first; outcomes are `same`, `diff`,
+///   `none` or `you`, and the last two are empty unless it went differently there
 /// - `next<TAB>year<TAB>title` for events still to come
 /// - `whatif<TAB>index<TAB>needs a tile (1 or 0)<TAB>title<TAB>description`
 #[no_mangle]
 pub extern "C" fn panel_text() -> usize {
     with_app(|app| {
-        let rules = app.sim.rules();
-        let mut out = format!("date\t{}\n", format_date(app.sim.month()));
+        let sim = shown(&app.t, app.unchanged_view);
+        let rules = sim.rules();
+        let mut out = format!("date\t{}\n", format_date(sim.month()));
         out += &format!("title\t{}\n", rules.title);
         out += &format!(
             "heads\t{}\t{}\n",
             rules.locals_heading, rules.powers_heading
         );
-        for civ in app.sim.civ_summaries() {
+        for civ in sim.civ_summaries() {
             let [r, g, b] = civ.color;
             out += &format!(
                 "civ\t#{r:02x}{g:02x}{b:02x}\t{}\t{}\t{}\t{}\t{}\n",
@@ -246,19 +285,27 @@ pub extern "C" fn panel_text() -> usize {
                 civ.status
             );
         }
-        for event in app.sim.events().iter().take(8) {
+        for event in sim.events().iter().take(8) {
             out += &format!("event\t{event}\n");
         }
         if let Some((x, y)) = app.selected {
-            out += &format!("tile\t{}\n", app.sim.describe_tile(x, y).replace('\n', "|"));
+            out += &format!("tile\t{}\n", sim.describe_tile(x, y).replace('\n', "|"));
         }
-        if let Some(text) = app.unit.and_then(|u| app.sim.describe_unit(u)) {
+        if let Some(text) = app.unit.and_then(|u| app.t.yours.describe_unit(u)) {
             out += &format!("unit\t{}\n", text.replace('\n', "|"));
         }
         if !app.message.is_empty() {
             out += &format!("say\t{}\n", app.message);
         }
-        out += &history_lines(&app.sim);
+        if let Some(m) = app.t.changed_at {
+            out += &format!(
+                "cmp\t{}\t{}\t{}\n",
+                era::year(m),
+                app.t.behind(),
+                app.unchanged_view as u8
+            );
+        }
+        out += &history_lines(&app.t);
         hand_over(app, out)
     })
 }
@@ -268,7 +315,8 @@ pub extern "C" fn panel_text() -> usize {
 pub extern "C" fn labels_text() -> usize {
     with_app(|app| {
         let mut out = String::new();
-        for label in render::city_labels(&app.sim, &app.camera, &app.fb) {
+        let sim = shown(&app.t, app.unchanged_view);
+        for label in render::city_labels(sim, &app.camera, &app.fb) {
             let [r, g, b] = label.color;
             out += &format!(
                 "{}\t{}\t#{r:02x}{g:02x}{b:02x}\t{}\n",
@@ -279,13 +327,28 @@ pub extern "C" fn labels_text() -> usize {
     })
 }
 
-fn history_lines(sim: &Simulation) -> String {
+fn outcome_word(o: Outcome) -> &'static str {
+    match o {
+        Outcome::AsInHistory => "same",
+        Outcome::Different => "diff",
+        Outcome::DidNotHappen => "none",
+        Outcome::Yours => "you",
+    }
+}
+
+fn history_lines(t: &Timelines) -> String {
     let mut out = String::new();
+    let sim = &t.yours;
     let setting = sim.rules().setting;
     let h = sim.history();
     if let Some(y) = h.economy.years.last() {
+        let (pop, gdp) = t
+            .unchanged_year(y.year)
+            .map_or((String::new(), String::new()), |u| {
+                (short(u.population), short(u.gdp))
+            });
         out += &format!(
-            "econ\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{}\t{}\n",
+            "econ\t{}\t{}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{}\t{}\t{pop}\t{gdp}\n",
             y.year,
             short(y.population),
             short(y.real_population),
@@ -315,14 +378,12 @@ fn history_lines(sim: &Simulation) -> String {
         }
     }
     for e in h.chronicle.iter().rev().take(12) {
-        let outcome = match e.outcome {
-            Outcome::AsInHistory => "same",
-            Outcome::Different => "diff",
-            Outcome::DidNotHappen => "none",
-            Outcome::Yours => "you",
-        };
+        let (theirs, their_text) = t
+            .unchanged_entry(e)
+            .map_or(("", String::new()), |u| (outcome_word(u.outcome), u.text));
         out += &format!(
-            "chron\t{outcome}\t{}\t{}\t{}\t{}\n",
+            "chron\t{}\t{}\t{}\t{}\t{}\t{theirs}\t{their_text}\n",
+            outcome_word(e.outcome),
             era::year(e.month),
             e.title,
             e.text,
@@ -345,17 +406,31 @@ fn history_lines(sim: &Simulation) -> String {
 }
 
 /// The economy's yearly accounts, for the charts: `year<TAB>population<TAB>real
-/// population<TAB>GDP<TAB>real GDP` per line, in people and 1990 dollars.
+/// population<TAB>GDP<TAB>real GDP<TAB>population unchanged<TAB>GDP unchanged` per
+/// line, in people and 1990 dollars. The unchanged figures are -1 for years the
+/// unchanged timeline hasn't reached, or before your first change.
 #[no_mangle]
 pub extern "C" fn series_text() -> usize {
     with_app(|app| {
         let mut out = String::new();
-        for y in &app.sim.history().economy.years {
+        let from = app.t.changed_at.map(era::year);
+        let unchanged = app.t.unchanged.as_ref().map(|u| u.history());
+        let theirs = unchanged
+            .as_ref()
+            .map(|h| &h.economy.years[..])
+            .unwrap_or(&[]);
+        for y in &app.t.yours.history().economy.years {
+            let other = theirs
+                .iter()
+                .find(|u| u.year == y.year)
+                .filter(|_| from.is_some_and(|f| y.year + 1 >= f));
+            let (up, ug) = other.map_or((-1.0, -1.0), |u| (u.population, u.gdp));
             out += &format!(
-                "{}\t{:.0}\t{:.0}\t{:.0}\t{:.0}\n",
+                "{}\t{:.0}\t{:.0}\t{:.0}\t{:.0}\t{up:.0}\t{ug:.0}\n",
                 y.year, y.population, y.real_population, y.gdp, y.real_gdp
             );
         }
+        drop(unchanged);
         hand_over(app, out)
     })
 }
