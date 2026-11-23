@@ -80,7 +80,50 @@ pub struct History {
     droughts: Vec<Failure>,
     /// The English town the French took in 1746, to hand back.
     madras: Option<Entity>,
+    /// Wars and battles, oldest first, for the map.
+    pub wars: Vec<War>,
     pub economy: Economy,
+}
+
+/// A war, campaign or battle, as the map shows it.
+#[derive(Clone, Debug)]
+pub struct War {
+    pub name: &'static str,
+    /// Where the fighting is: a battlefield or a besieged town.
+    pub site: Position,
+    /// Who attacks. Invaders from beyond the map, such as Nader Shah's Persians, have
+    /// no civ of their own, only a color.
+    pub attacker: Option<Entity>,
+    pub color: [u8; 3],
+    /// Where the attack comes from, if not the middle of the attacker's towns.
+    pub from: Option<Position>,
+    pub start: u32,
+    /// The last month the fighting goes on.
+    pub end: u32,
+    /// Towns fought over, hatched on the map while the war goes on.
+    pub towns: Vec<Entity>,
+    /// Towns still to fall to the attacker, nearest first, one every `every` months,
+    /// so long as `defender` still holds them.
+    queue: Vec<Entity>,
+    /// How many towns the attacker set out to take.
+    planned: usize,
+    defender: Option<Entity>,
+    every: u32,
+    next: u32,
+}
+
+impl War {
+    pub fn active(&self, month: u32) -> bool {
+        (self.start..=self.end).contains(&month)
+    }
+
+    /// How many of its towns the attacker has taken, and how many it set out to.
+    pub fn progress(&self) -> (usize, usize) {
+        (
+            self.planned - self.queue.len().min(self.planned),
+            self.planned,
+        )
+    }
 }
 
 impl History {
@@ -232,12 +275,165 @@ pub fn play(world: &World, commands: &mut Commands) {
         });
     }
 
+    // Campaigns: the next town falls.
+    let falls: Vec<(usize, Entity)> = {
+        let h = world.resource::<History>();
+        h.wars
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| !w.queue.is_empty() && now >= w.next)
+            .map(|(i, w)| (i, w.queue[0]))
+            .collect()
+    };
+    for (i, town) in falls {
+        commands.add(move |w| fall(w, i, town));
+    }
+
     if now % 12 == 11 && rules.setting == Setting::India {
         commands.add(move |w| {
             let mut economy = std::mem::take(&mut w.resource_mut::<History>().economy);
             economy.close_year(w, era::year(now));
             w.resource_mut::<History>().economy = economy;
         });
+    }
+}
+
+/// The next town of a campaign falls to the attacker, if its defender still holds it.
+fn fall(world: &mut World, war: usize, town: Entity) {
+    let now = now(world);
+    let (attacker, defender, name) = {
+        let mut h = world.resource_mut::<History>();
+        let w = &mut h.wars[war];
+        w.queue.retain(|&t| t != town);
+        w.next = now + w.every;
+        if w.queue.is_empty() {
+            w.end = w.end.max(now + 2);
+        }
+        (w.attacker, w.defender, w.name)
+    };
+    let Some(attacker) = attacker else { return };
+    let owner = world.read::<Owner>().get(town).map(|o| o.0);
+    if owner.is_none() || (defender.is_some() && owner != defender) {
+        return;
+    }
+    let Some(held) = town_held(world, town) else {
+        return;
+    };
+    let town_name = held.name.clone();
+    transfer(world, &[held], attacker);
+    let who = world
+        .read::<Civ>()
+        .get(attacker)
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+    world
+        .resource_mut::<EventLog>()
+        .push(now, format!("{name}: {town_name} falls to the {who}"));
+}
+
+fn town_held(world: &World, town: Entity) -> Option<Held> {
+    let c = world.read::<City>();
+    let city = c.get(town)?;
+    Some(Held {
+        town,
+        pos: *world.read::<Position>().get(town)?,
+        name: city.name.clone(),
+        population: city.population,
+    })
+}
+
+/// How a war is fought: a battle (no towns change hands), a siege of some towns, or
+/// a campaign that takes towns one by one.
+struct Fight {
+    name: &'static str,
+    /// Where it is, in longitude and latitude.
+    site: (f32, f32),
+    attacker: Option<Entity>,
+    /// The color of attackers with no civ.
+    color: [u8; 3],
+    /// Where an attack from off the map comes from, in longitude and latitude.
+    from: Option<(f32, f32)>,
+    months: u32,
+    /// Towns fought over but not taken.
+    contested: Vec<Held>,
+    /// Towns to take, one every `every` months, from `defender`.
+    take: Vec<Held>,
+    defender: Option<Entity>,
+    every: u32,
+}
+
+impl Fight {
+    fn battle(name: &'static str, site: (f32, f32), attacker: Option<Entity>) -> Self {
+        Self {
+            name,
+            site,
+            attacker,
+            color: [220, 60, 50],
+            from: None,
+            months: 3,
+            contested: Vec::new(),
+            take: Vec::new(),
+            defender: None,
+            every: 1,
+        }
+    }
+}
+
+/// Puts a war on the map. Towns to take are ordered nearest the attacker first, so
+/// the front moves across the country.
+fn wage(world: &World, f: Fight) {
+    let now = now(world);
+    let color = f
+        .attacker
+        .and_then(|a| world.read::<Civ>().get(a).map(|c| c.color))
+        .unwrap_or(f.color);
+    let base = f
+        .attacker
+        .and_then(|a| crate::render::civ_centers_of(world).get(&a).copied());
+    let mut take = f.take;
+    if let Some((bx, by)) = base {
+        take.sort_by(|a, b| {
+            let d = |t: &Held| (t.pos.x as f32 - bx).powi(2) + (t.pos.y as f32 - by).powi(2);
+            d(a).total_cmp(&d(b))
+        });
+    }
+    let mut towns: Vec<Entity> = f.contested.iter().map(|t| t.town).collect();
+    towns.extend(take.iter().map(|t| t.town));
+    let queue: Vec<Entity> = take.iter().map(|t| t.town).collect();
+    let months = f.months.max(queue.len() as u32 * f.every + 2);
+    let war = War {
+        name: f.name,
+        site: clamped(world, f.site.0, f.site.1),
+        attacker: f.attacker,
+        color,
+        from: f.from.map(|(lon, lat)| clamped(world, lon, lat)),
+        start: now,
+        end: now + months,
+        towns,
+        planned: queue.len(),
+        queue,
+        defender: f.defender,
+        every: f.every,
+        next: now + 1,
+    };
+    world.resource_mut::<History>().wars.push(war);
+}
+
+/// [`wage`], at a town's tile rather than a longitude and latitude.
+fn wage_at(world: &World, f: Fight, (x, y): (i32, i32)) {
+    wage(world, f);
+    if let Some(war) = world.resource_mut::<History>().wars.last_mut() {
+        war.site = Position { x, y };
+    }
+}
+
+/// A tile for a longitude and latitude, kept on the map.
+fn clamped(world: &World, lon: f32, lat: f32) -> Position {
+    let map = world.resource::<Map>();
+    let (x, y) = era::project(lon, lat, map.width, map.height);
+    Position {
+        x: x.clamp(0, map.width as i32 - 1),
+        y: y.clamp(0, map.height as i32 - 1),
     }
 }
 
@@ -639,7 +835,7 @@ fn english_trade(world: &World) -> Result<(), &'static str> {
     Ok(())
 }
 
-static INDIA: [Event; 29] = [
+static INDIA: [Event; 30] = [
     Event {
         date: month(1600, 12),
         late: 0,
@@ -668,6 +864,7 @@ static INDIA: [Event; 29] = [
                     c.emigrants_per_year *= 0.7;
                 }
             }
+            wage(w, Fight::battle("Battle of Swally", (72.65, 21.08), civ(w, ENGLISH)));
             (Outcome::AsInHistory, "English ships beat the Portuguese off Surat; Portugal's hold on the sea lanes slips.".into())
         },
     },
@@ -786,9 +983,14 @@ static INDIA: [Event; 29] = [
         },
         apply: |w| {
             let towns = held(w, DECCAN, None);
-            let mughals = civ(w, MUGHALS).unwrap();
-            transfer(w, &towns, mughals);
-            (Outcome::AsInHistory, format!("The Mughals take Bijapur and Golconda, and with them {}.", names(&towns)))
+            let text = format!("Aurangzeb's armies march south against {}.", names(&towns));
+            wage(w, Fight {
+                take: towns,
+                defender: civ(w, DECCAN),
+                months: 12,
+                ..Fight::battle("Aurangzeb's Deccan wars", (78.4, 17.38), civ(w, MUGHALS))
+            });
+            (Outcome::AsInHistory, text)
         },
     },
     Event {
@@ -882,9 +1084,13 @@ static INDIA: [Event; 29] = [
         },
         apply: |w| {
             let towns = held(w, MUGHALS, Some(MALWA));
-            let marathas = civ(w, MARATHAS).unwrap();
-            transfer(w, &towns, marathas);
-            (Outcome::AsInHistory, format!("Maratha armies take {}.", names(&towns)))
+            let text = format!("Maratha armies ride north into Malwa, against {}.", names(&towns));
+            wage(w, Fight {
+                take: towns,
+                defender: civ(w, MUGHALS),
+                ..Fight::battle("Maratha conquest of Malwa", (77.4, 23.26), civ(w, MARATHAS))
+            });
+            (Outcome::AsInHistory, text)
         },
     },
     Event {
@@ -906,6 +1112,13 @@ static INDIA: [Event; 29] = [
             scale_people(w, &delhi, 0.97);
             scale_food(w, &delhi, 0.2);
             w.resource_mut::<History>().cohesion -= 0.2;
+            wage(w, Fight {
+                color: [80, 200, 210],
+                from: Some((66.0, 34.0)),
+                months: 4,
+                contested: delhi,
+                ..Fight::battle("Nader Shah's invasion", (76.98, 29.69), None)
+            });
             (Outcome::AsInHistory, "Persian troops sack Delhi and carry off the imperial treasury.".into())
         },
     },
@@ -931,6 +1144,11 @@ static INDIA: [Event; 29] = [
             let french = civ(w, FRENCH).unwrap();
             let name = town.name.clone();
             w.resource_mut::<History>().madras = Some(town.town);
+            let site = (town.pos.x, town.pos.y);
+            wage_at(w, Fight {
+                contested: vec![town_held(w, town.town).unwrap()],
+                ..Fight::battle("Siege of Madras", (0.0, 0.0), Some(french))
+            }, site);
             transfer(w, &[town], french);
             set_mark(w, Mark::FrenchHoldMadras);
             (Outcome::AsInHistory, format!("A French squadron takes {name} from the English."))
@@ -978,6 +1196,7 @@ static INDIA: [Event; 29] = [
         },
         apply: |w| {
             set_mark(w, Mark::ArcotHeld);
+            wage(w, Fight { months: 4, ..Fight::battle("Siege of Arcot", (79.37, 12.9), civ(w, ENGLISH)) });
             (Outcome::AsInHistory, "Clive holds Arcot, and the English gain the upper hand in the Carnatic.".into())
         },
     },
@@ -1002,7 +1221,14 @@ static INDIA: [Event; 29] = [
                 .iter()
                 .find(|t| t.name == "Calcutta" || t.name == "Fort William")
                 .unwrap_or(&towns[0]);
-            (Outcome::AsInHistory, format!("The Nawab's army storms the English factory at {}.", town.name))
+            let text = format!("The Nawab's army storms the English factory at {}.", town.name);
+            let site = (town.pos.x, town.pos.y);
+            let contested = vec![town_held(w, town.town).unwrap()];
+            wage_at(w, Fight {
+                contested,
+                ..Fight::battle("Fall of Calcutta", (0.0, 0.0), civ(w, BENGAL_NAWABS))
+            }, site);
+            (Outcome::AsInHistory, text)
         },
     },
     Event {
@@ -1024,6 +1250,11 @@ static INDIA: [Event; 29] = [
             Ok(())
         },
         apply: |w| {
+            let from = held(w, ENGLISH, Some(BENGAL)).first().map(|t| t.pos);
+            wage(w, Fight { months: 2, ..Fight::battle("Battle of Plassey", (88.25, 23.8), civ(w, ENGLISH)) });
+            if let (Some(from), Some(war)) = (from, w.resource_mut::<History>().wars.last_mut()) {
+                war.from = Some(from);
+            }
             if mark(w, Mark::MirJafarLoyal) {
                 let towns = held(w, ENGLISH, Some(BENGAL));
                 let nawabs = civ(w, BENGAL_NAWABS).unwrap();
@@ -1051,7 +1282,28 @@ static INDIA: [Event; 29] = [
         apply: |w| {
             let towns = held(w, MARATHAS, None);
             scale_people(w, &towns, 0.97);
+            wage(w, Fight {
+                color: [170, 130, 80],
+                from: Some((68.5, 33.0)),
+                ..Fight::battle("Third Battle of Panipat", (76.97, 29.39), None)
+            });
             (Outcome::AsInHistory, "The Afghans crush the Maratha army, and a generation of its leaders dies.".into())
+        },
+    },
+    Event {
+        date: month(1764, 10),
+        late: 0,
+        title: "The Battle of Buxar",
+        real: "Hector Munro's Company army beats the combined forces of the Nawabs of Bengal and Awadh and the Mughal emperor.",
+        needs: |w| {
+            if !mark(w, Mark::PlasseyWon) {
+                return Err("the Company had never won at Plassey, and had no army in Bengal");
+            }
+            Ok(())
+        },
+        apply: |w| {
+            wage(w, Fight { months: 2, ..Fight::battle("Battle of Buxar", (83.98, 25.57), civ(w, ENGLISH)) });
+            (Outcome::AsInHistory, "The Company's army beats the Nawabs and the emperor at Buxar.".into())
         },
     },
     Event {
@@ -1111,9 +1363,13 @@ static INDIA: [Event; 29] = [
         },
         apply: |w| {
             let towns = held(w, SOUTH, Some(MYSORE));
-            let company = civ(w, COMPANY_STATE).unwrap();
-            transfer(w, &towns, company);
-            (Outcome::AsInHistory, format!("The Company takes {}.", names(&towns)))
+            let text = format!("The Company's armies march on Seringapatam and {}.", names(&towns));
+            wage(w, Fight {
+                take: towns,
+                defender: civ(w, SOUTH),
+                ..Fight::battle("Fourth Anglo-Mysore War", (76.69, 12.42), civ(w, COMPANY_STATE))
+            });
+            (Outcome::AsInHistory, text)
         },
     },
     Event {
@@ -1133,13 +1389,16 @@ static INDIA: [Event; 29] = [
         apply: |w| {
             let mut towns = held(w, MUGHALS, Some(DELHI_AGRA));
             towns.extend(held(w, MARATHAS, Some(DELHI_AGRA)));
-            let company = civ(w, COMPANY_STATE).unwrap();
-            transfer(w, &towns, company);
-            (Outcome::AsInHistory, format!("The Company takes {}.", names(&towns)))
+            let text = format!("Lake's army marches on {}.", names(&towns));
+            wage(w, Fight {
+                take: towns,
+                ..Fight::battle("Second Anglo-Maratha War", (77.3, 28.6), civ(w, COMPANY_STATE))
+            });
+            (Outcome::AsInHistory, text)
         },
     },
     Event {
-        date: month(1818, 6),
+        date: month(1817, 11),
         late: 10,
         title: "The end of the Maratha Empire",
         real: "The Peshwa surrenders, ending the Third Anglo-Maratha War; the Company is master of most of India.",
@@ -1154,9 +1413,13 @@ static INDIA: [Event; 29] = [
         },
         apply: |w| {
             let towns = held(w, MARATHAS, None);
-            let company = civ(w, COMPANY_STATE).unwrap();
-            transfer(w, &towns, company);
-            (Outcome::AsInHistory, format!("The Company annexes the Peshwa's lands: {}.", names(&towns)))
+            let text = format!("The Third Anglo-Maratha War: the Company takes {} one by one.", names(&towns));
+            wage(w, Fight {
+                take: towns,
+                defender: civ(w, MARATHAS),
+                ..Fight::battle("Third Anglo-Maratha War", (73.86, 18.52), civ(w, COMPANY_STATE))
+            });
+            (Outcome::AsInHistory, text)
         },
     },
     Event {
@@ -1175,6 +1438,12 @@ static INDIA: [Event; 29] = [
             let towns = held(w, COMPANY_STATE, Some(NORTH));
             scale_people(w, &towns, 0.98);
             scale_food(w, &towns, 0.6);
+            wage(w, Fight {
+                color: [235, 80, 60],
+                months: 14,
+                contested: towns.iter().map(|t| town_held(w, t.town).unwrap()).collect(),
+                ..Fight::battle("Rebellion of 1857", (77.7, 28.98), None)
+            });
             (Outcome::AsInHistory, format!("Revolt spreads through {} before it is put down.", names(&towns)))
         },
     },
@@ -1393,8 +1662,48 @@ mod tests {
         let years = &sim.history().economy.years;
         assert_eq!(years.len(), 112);
         let first = &years[0];
-        assert!((first.gdp / first.real_gdp - 1.0).abs() < 0.05, "{first:?}");
+        let real_per_head = first.real_gdp / first.real_population;
+        assert!(
+            (first.per_head() / real_per_head - 1.0).abs() < 0.05,
+            "{first:?}"
+        );
         assert!(years.iter().all(|y| y.gdp > 0.0 && y.population > 0.0));
+    }
+
+    #[test]
+    fn campaigns_take_towns_one_by_one_and_battles_mark_the_map() {
+        let mut sim = Simulation::scenario(Setting::India, 7);
+        run_to(&mut sim, 1687);
+        while sim.month() <= month(1687, 9) {
+            sim.step_month();
+        }
+        let deccan = |sim: &Simulation| held(&sim.world, DECCAN, None).len();
+        let before = deccan(&sim);
+        let war = sim
+            .history()
+            .wars
+            .iter()
+            .find(|w| w.name == "Aurangzeb's Deccan wars")
+            .cloned();
+        let war = war.expect("the Deccan campaign should be on the map");
+        assert!(war.active(sim.month()) && war.progress().1 == before + war.progress().0);
+        sim.step_month();
+        sim.step_month();
+        let after = deccan(&sim);
+        assert!(
+            after < before && after > 0,
+            "towns should fall one at a time: {before} -> {after}"
+        );
+        run_to(&mut sim, 1691);
+        assert_eq!(deccan(&sim), 0);
+        let h = sim.history();
+        let done = h
+            .wars
+            .iter()
+            .find(|w| w.name == "Aurangzeb's Deccan wars")
+            .unwrap();
+        assert!(!done.active(sim.month()));
+        assert_eq!(done.progress().0, done.progress().1);
     }
 
     #[test]

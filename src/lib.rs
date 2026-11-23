@@ -5,6 +5,7 @@ pub mod history;
 pub mod render;
 pub mod sim;
 pub mod timelines;
+pub mod trade;
 pub mod world;
 
 #[cfg(target_arch = "wasm32")]

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::ecs::{Commands, Entity, Schedule, World};
 use crate::era::{self, Culture, Landing, Scenario, Setting};
 use crate::history::{self, History};
+use crate::trade::{self, Trade};
 use crate::world::{Map, Terrain};
 
 pub use crate::era::format_date;
@@ -1864,7 +1865,11 @@ fn city_economy(world: &World, _: &mut Commands) {
             .filter(|(p, _)| p.dist2(pos) <= TRADE_RADIUS * TRADE_RADIUS)
             .map(|(_, n)| n)
             .sum();
-        civ.goods += if folk.trade_only {
+        civ.goods += if folk.trade_only && setting == Setting::India {
+            // What the factory buys from the towns around it is traced town by town
+            // (see `crate::trade`); its own wharves add a little.
+            0.05 * t.wharves as f32
+        } else if folk.trade_only {
             market as f32 / 3000.0 * (1.0 + 0.3 * t.workshops as f32) + 0.05 * t.wharves as f32
         } else {
             let furs = t.trading_posts as f32 * (0.05 + market as f32 / 8000.0);
@@ -3001,6 +3006,7 @@ impl Simulation {
         world.insert_resource(Drought::default());
         world.insert_resource(Rules(scenario));
         world.insert_resource(History::default());
+        world.insert_resource(Trade::default());
 
         let schedule = Schedule::new()
             .with("monsoon", monsoon)
@@ -3017,6 +3023,7 @@ impl Simulation {
             .with("send_ships", send_ships)
             .with("sail_ships", sail_ships)
             .with("year_end", year_end)
+            .with("trade", trade::flow)
             .with("history", history::play)
             .with("advance_clock", advance_clock);
 

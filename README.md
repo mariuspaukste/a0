@@ -77,6 +77,33 @@ people, $74 billion in 1990 dollars), and the charts set the timeline against hi
 figures for later years. Tap a chart to read off a year. The input coefficients are
 round, illustrative numbers, not estimates for any real year.
 
+## Trade
+
+In the India scenario, goods are traced from where they're grown to where they leave
+the country. Each month every town brings in what its land is known for: cotton in
+Gujarat and the Deccan, raw silk in Bengal, pepper on the Malabar coast, indigo
+around Ahmedabad and Agra, saltpetre in Bihar, and a little cotton almost everywhere.
+Raw cotton is carted to the nearest weaving centre (a town with several weavers'
+quarters) and woven into cloth. Half of the cloth, silk, pepper, indigo and saltpetre
+is sold to the two nearest European factories within reach, the nearer taking more,
+and the rest is sold at home. What a factory buys is its company's cargo for the
+ships home, and each state's sales feed the economy's exports, by the sector that
+made them.
+
+On the map each route is a curved line in the good's colour, as wide as the trade is
+large, with goods moving along it toward the buyer. Tap a town to see what it sends
+where. The Economy tab lists each good's output and exports, and the biggest routes.
+
+## Wars
+
+Wars are fought on the map. A battle or siege gets crossed swords at its real site,
+pulsing while the fighting goes on, with an arrow from where the attack comes from.
+A campaign, such as Aurangzeb's conquest of the Deccan sultanates, the Maratha
+conquest of Malwa or the Company's wars against Mysore and the Marathas, takes the
+defender's towns one at a time, nearest the attacker first, so the front moves across
+the country. Towns being fought over are striped in the attacker's colour. The World
+tab lists wars, with how many towns have fallen. Tap one to go to it.
+
 ## Towns
 
 Every lot in a town has a land value. Lots near the market square, the waterfront, the
@@ -105,7 +132,7 @@ sized by its people (a white centre marks a city). Close in, the colours fade to
 fields, streets and buildings. **Map colours** can keep states bold or faint at every
 zoom instead. A red ring marks a town with plague or another epidemic, an orange ring
 a town going hungry, and a dashed orange ring the area where the monsoon (or the
-harvest) has failed. Town names never overlap: towns in trouble and big towns are
+harvest) has failed. Trade routes and wars can be switched off in the menu. Town names never overlap: towns in trouble and big towns are
 named first.
 
 Ships and bands of settlers run themselves, but you can take over any of them. Tap one
@@ -125,6 +152,7 @@ to pick it (it's ringed in gold and its route is dotted), then tap where it shou
 | `src/era.rs` | The historical settings: peoples, powers, arrival dates, real towns and places, names, calendar and climate |
 | `src/history.rs` | Real history as a timeline of events with conditions and effects, the player's what-ifs, and the chronicle |
 | `src/timelines.rs` | Your timeline and the unchanged one, replayed from the same seed after your first change |
+| `src/trade.rs` | Goods traced town by town: grown, carted to weaving centres, sold to the European factories |
 | `src/economy.rs` | The yearly input–output (Leontief) accounts: output by sector, GDP, food, exports, Company revenue |
 | `src/world.rs` | Terrain: noise-generated continents, and the map of India |
 | `src/sim.rs` | Components, resources and the systems that run every month, plus orders for units |
