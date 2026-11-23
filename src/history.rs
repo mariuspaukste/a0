@@ -22,7 +22,9 @@ use std::collections::BTreeSet;
 use crate::economy::{Economy, COMPANY_STATE};
 use crate::ecs::{Commands, Entity, World};
 use crate::era::{self, month, Setting, Town};
-use crate::sim::{self, City, Civ, Clock, Drought, EventLog, Outbreak, Owner, Position, Rules};
+use crate::sim::{
+    self, City, Civ, Clock, Drought, EventLog, Outbreak, Owner, Position, Rules, DROUGHT_KEEP,
+};
 use crate::world::Map;
 
 /// How an event of the timeline came out.
@@ -74,8 +76,8 @@ pub struct History {
     pub chronicle: Vec<Entry>,
     /// Which events of the timeline have come and gone.
     settled: Vec<bool>,
-    /// Failed monsoons waiting for their year's harvest: (year, centre, radius).
-    droughts: Vec<(u32, Position, i32)>,
+    /// Failed monsoons waiting for their year's harvest.
+    droughts: Vec<Failure>,
     /// The English town the French took in 1746, to hand back.
     madras: Option<Entity>,
     pub economy: Economy,
@@ -100,6 +102,16 @@ pub fn start(world: &mut World) {
         economy,
         ..History::default()
     };
+}
+
+/// A failed harvest waiting for its year.
+#[derive(Clone, Copy, Debug)]
+struct Failure {
+    year: u32,
+    center: Position,
+    radius: i32,
+    /// The share of a usual harvest that still comes in.
+    keep: f32,
 }
 
 /// An event of real history.
@@ -159,19 +171,19 @@ pub fn play(world: &World, commands: &mut Commands) {
     // monsoon can't undo them. Outside India nothing else clears a failed harvest.
     if now % 12 + 1 == rules.harvest_month {
         let year = era::year(now);
-        let due: Vec<(Position, i32)> = {
+        let due: Vec<Failure> = {
             let mut h = world.resource_mut::<History>();
             let due = h
                 .droughts
                 .iter()
-                .filter(|d| d.0 == year)
-                .map(|d| (d.1, d.2))
+                .filter(|d| d.year == year)
+                .copied()
                 .collect();
-            h.droughts.retain(|d| d.0 > year);
+            h.droughts.retain(|d| d.year > year);
             due
         };
-        for (center, r) in due {
-            commands.add(move |w| set_drought(w, center, r));
+        for f in due {
+            commands.add(move |w| set_drought(w, f));
         }
     }
     if rules.setting != Setting::India && now % 12 == (rules.harvest_month + 1) % 12 {
@@ -519,25 +531,33 @@ fn nearest_town(world: &World, at: Position) -> Option<(Entity, Position, String
         .min_by_key(|(_, p, _)| p.dist2(at))
 }
 
-/// Fails the monsoon (or the harvest) within radius `r` of `center` at the coming
-/// harvest.
-fn fail_harvest(world: &World, center: Position, r: i32) -> u32 {
+/// Fails the monsoon (or the harvest) within `radius` of `center` at the coming
+/// harvest, leaving `keep` of a usual crop. Returns the year it fails.
+fn fail_harvest(world: &World, center: Position, radius: i32, keep: f32) -> u32 {
     let now = now(world);
     let harvest = world.resource::<Rules>().0.harvest_month;
+    let year = era::year(now) + if now % 12 + 1 > harvest { 1 } else { 0 };
+    let f = Failure {
+        year,
+        center,
+        radius,
+        keep,
+    };
     if now % 12 + 1 == harvest {
-        set_drought(world, center, r);
-        return era::year(now);
+        set_drought(world, f);
+    } else {
+        world.resource_mut::<History>().droughts.push(f);
     }
-    let year = era::year(now) + if now % 12 >= harvest { 1 } else { 0 };
-    world
-        .resource_mut::<History>()
-        .droughts
-        .push((year, center, r));
     year
 }
 
-fn set_drought(world: &World, center: Position, r: i32) {
-    world.resource_mut::<Drought>().area = Some((center, r * r));
+fn set_drought(world: &World, f: Failure) {
+    let center = f.center;
+    {
+        let mut d = world.resource_mut::<Drought>();
+        d.area = Some((center, f.radius * f.radius));
+        d.keep = f.keep;
+    }
     let india = world.resource::<Rules>().0.setting == Setting::India;
     if let Some((_, _, name)) = nearest_town(world, center) {
         let text = if india {
@@ -596,6 +616,14 @@ fn english_town(
 // ---------------------------------------------------------------------------
 // India, 1600–1858
 // ---------------------------------------------------------------------------
+
+/// What the great famines left of the harvest. Set so that, over a handful of seeds,
+/// the simulation's excess deaths (against the same world with a good harvest) come
+/// out near the usual estimates: some 7.4 million in Gujarat and the Deccan in
+/// 1630–32, and seven to ten million in Bengal in 1770. A random failed monsoon is
+/// harsher on the towns it hits, but hits far fewer of them.
+const DECCAN_KEEP: f32 = 0.5;
+const BENGAL_KEEP: f32 = 0.5;
 
 fn always(_: &World) -> Result<(), &'static str> {
     Ok(())
@@ -672,8 +700,13 @@ static INDIA: [Event; 29] = [
         needs: always,
         apply: |w| {
             let center = tile(w, 75.0, 20.5);
-            fail_harvest(w, center, 26);
-            w.resource_mut::<History>().droughts.push((1631, center, 22));
+            fail_harvest(w, center, 26, DECCAN_KEEP);
+            w.resource_mut::<History>().droughts.push(Failure {
+                year: 1631,
+                center,
+                radius: 22,
+                keep: DECCAN_KEEP,
+            });
             (Outcome::AsInHistory, "The monsoon fails over Gujarat and the Deccan, two years running.".into())
         },
     },
@@ -1052,7 +1085,7 @@ static INDIA: [Event; 29] = [
         apply: |w| {
             let (lon, lat) = BENGAL.center();
             let center = tile(w, lon, lat);
-            fail_harvest(w, center, 24);
+            fail_harvest(w, center, 24, BENGAL_KEEP);
             let ruled = held(w, COMPANY_STATE, Some(BENGAL));
             if ruled.is_empty() {
                 (Outcome::Different, "The rains fail in Bengal, but with no Company collecting the revenue, the granaries are fuller.".into())
@@ -1246,7 +1279,7 @@ static INDIA_WHAT_IFS: [WhatIf; 7] = [
         available: |_| true,
         apply: |w, at| {
             let center = at.unwrap_or_else(|| tile(w, 78.0, 22.0));
-            let year = fail_harvest(w, center, 22);
+            let year = fail_harvest(w, center, 22, DROUGHT_KEEP);
             format!("The rains will fail here in {year}.")
         },
     },
@@ -1285,7 +1318,7 @@ static NEW_WORLD_WHAT_IFS: [WhatIf; 2] = [
                     y: map.height as i32 / 2,
                 }
             });
-            let year = fail_harvest(w, center, 18);
+            let year = fail_harvest(w, center, 18, DROUGHT_KEEP);
             format!("The harvest will fail here in {year}.")
         },
     },
