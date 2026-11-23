@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use crate::ecs::Entity;
 use crate::era::{self, Culture, Setting};
 use crate::sim::{
-    group, Building, Burning, City, Civ, LandValue, Owner, Position, Settler, Ship, Simulation,
-    Tiles,
+    group, Building, Burning, City, Civ, Drought, LandValue, Owner, Position, Settler, Ship,
+    Simulation, Tiles,
 };
 use crate::world::{hash, Map, Terrain};
 
@@ -28,10 +28,24 @@ const FIRE: Rgb = [250, 150, 40];
 const SAIL: Rgb = [244, 240, 226];
 const WHITE: Rgb = [250, 250, 250];
 const GOLD: Rgb = [255, 204, 51];
+const INK: Rgb = [16, 18, 28];
+/// Plague and other epidemics.
+const SICK: Rgb = [238, 64, 64];
+/// Hunger, and failed monsoons.
+const HUNGRY: Rgb = [244, 168, 56];
+
+/// Below this zoom (screen pixels per tile) buildings are too small to make out, so
+/// towns are drawn as markers instead.
+const DETAIL_ZOOM: f32 = 5.0;
+/// Below this zoom towns get a marker, and states their name.
+const OVERVIEW_ZOOM: f32 = 9.0;
 
 pub struct Framebuffer {
     pub width: usize,
     pub height: usize,
+    /// Device pixels per CSS pixel, so markers and lines keep their size on screens
+    /// of any density.
+    pub scale: f32,
     /// One `u32` per pixel. On little-endian wasm its bytes are R, G, B, A, which is
     /// exactly the layout the canvas `ImageData` expects.
     pub pixels: Vec<u32>,
@@ -42,12 +56,52 @@ impl Framebuffer {
         Self {
             width,
             height,
+            scale: 1.0,
             pixels: vec![0; width * height],
         }
     }
 
     pub fn resize(&mut self, width: usize, height: usize) {
+        let scale = self.scale;
         *self = Self::new(width, height);
+        self.scale = scale;
+    }
+
+    /// A filled circle.
+    fn disc(&mut self, cx: f32, cy: f32, r: f32, color: Rgb) {
+        let y0 = (cy - r).floor() as i32;
+        let y1 = (cy + r).ceil() as i32;
+        for y in y0..y1 {
+            let dy = y as f32 + 0.5 - cy;
+            let w2 = r * r - dy * dy;
+            if w2 <= 0.0 {
+                continue;
+            }
+            let w = w2.sqrt();
+            let row = Rect::new((cx - w).round() as i32, y, (cx + w).round() as i32, y + 1);
+            self.fill(row, color);
+        }
+    }
+
+    /// A circle outline of thickness `t`, dashed if `dash` is set.
+    fn ring(&mut self, cx: f32, cy: f32, r: f32, t: f32, color: Rgb, dash: bool) {
+        let steps = ((std::f32::consts::TAU * r / (t * 0.6)) as usize).clamp(16, 4000);
+        let half = t / 2.0;
+        for i in 0..steps {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            // Dashes and gaps about four line-widths long.
+            if dash && ((a * r) / (4.0 * t)) as usize % 2 == 1 {
+                continue;
+            }
+            let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
+            let dot = Rect::new(
+                (x - half).round() as i32,
+                (y - half).round() as i32,
+                (x + half).round() as i32,
+                (y + half).round() as i32,
+            );
+            self.fill(dot, color);
+        }
     }
 
     fn clear(&mut self, color: Rgb) {
@@ -269,6 +323,34 @@ impl Camera {
         }
     }
 
+    /// Fits the whole map into the part of the screen from (`left`, `top`) to (`right`,
+    /// `bottom`), in screen pixels: the part not covered by panels.
+    pub fn fit_area(
+        map_width: usize,
+        map_height: usize,
+        fb: &Framebuffer,
+        (left, top, right, bottom): (f32, f32, f32, f32),
+    ) -> Self {
+        let (w, h) = ((right - left).max(50.0), (bottom - top).max(50.0));
+        let zoom = (w / map_width as f32)
+            .min(h / map_height as f32)
+            .clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        // Put the map's middle at the middle of the area.
+        let (ax, ay) = ((left + right) / 2.0, (top + bottom) / 2.0);
+        Self {
+            x: map_width as f32 / 2.0 - (ax - fb.width as f32 / 2.0) / zoom,
+            y: map_height as f32 / 2.0 - (ay - fb.height as f32 / 2.0) / zoom,
+            zoom,
+        }
+    }
+
+    /// Centres the view on a tile, zooming in far enough to see its towns.
+    pub fn focus(&mut self, x: f32, y: f32) {
+        self.x = x;
+        self.y = y;
+        self.zoom = self.zoom.max(8.0);
+    }
+
     pub fn to_screen(&self, tx: f32, ty: f32, fb: &Framebuffer) -> (f32, f32) {
         (
             (tx - self.x) * self.zoom + fb.width as f32 / 2.0,
@@ -329,6 +411,30 @@ pub enum Overlay {
     LandValue,
 }
 
+/// How states are colored on the map.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Style {
+    /// Boldly when zoomed out, to see who rules what, fading close in to show the land.
+    #[default]
+    Auto,
+    /// Boldly at every zoom.
+    States,
+    /// Hardly at all: the land as it looks, with states outlined.
+    Land,
+}
+
+/// How much a tile takes on its state's color.
+fn state_tint(style: Style, zoom: f32) -> f32 {
+    match style {
+        Style::States => 0.6,
+        Style::Land => 0.08,
+        Style::Auto => {
+            let t = ((zoom - 4.0) / 10.0).clamp(0.0, 1.0);
+            0.6 + (0.16 - 0.6) * t
+        }
+    }
+}
+
 /// The overlay color for a land value from 0 to 100. Most lots are worth between 30
 /// and 75, so the colors span that.
 fn value_color(value: u8) -> Rgb {
@@ -368,6 +474,7 @@ pub fn render(
     selected: Option<(i32, i32)>,
     unit: Option<Entity>,
     overlay: Overlay,
+    style: Style,
 ) {
     fb.clear(SEA);
     let map = sim.world.resource::<Map>();
@@ -389,7 +496,22 @@ pub fn render(
     let y0 = (fy0.floor() as i32).max(0);
     let x1 = (fx1.ceil() as i32).min(map.width as i32);
     let y1 = (fy1.ceil() as i32).min(map.height as i32);
-    let border = ((cam.zoom / 8.0) as i32).max(1);
+    let u = fb.scale;
+    let border = ((cam.zoom / 8.0) as i32).max(u.round() as i32).max(1);
+    let tint = state_tint(style, cam.zoom);
+    let detail = cam.zoom >= DETAIL_ZOOM;
+    // On bold colors a dark border reads best; on the land, a light one.
+    let edge_of = |c: Rgb| {
+        if tint >= 0.35 {
+            shade(c, 0.45)
+        } else {
+            shade(c, 1.15)
+        }
+    };
+    // A failed monsoon's area is washed in dry ochre, and ringed below.
+    let drought = sim.world.resource::<Drought>().area;
+    let parched =
+        |x: i32, y: i32| drought.is_some_and(|(c, r2)| (x - c.x).pow(2) + (y - c.y).pow(2) <= r2);
 
     for y in y0..y1 {
         let latitude = era::latitude(y, map.height);
@@ -399,12 +521,19 @@ pub fn render(
             let terrain = map.get(x as usize, y as usize);
             let mut color = terrain_color(terrain, x, y, latitude, &season);
             if let Some(f) = folk {
-                color = mix(color, f.color, 0.16);
+                color = mix(color, f.color, tint);
+            }
+            if parched(x, y) {
+                color = mix(color, [196, 138, 58], 0.3);
             }
             fb.fill(r, color);
             let snow = season.snow(x, y, latitude);
             let lit = tiles.building(x, y) == Building::Ruins && burning.is_burning(x, y);
-            draw_building(fb, &tiles, &season, snow, (x, y), r, folk, lit);
+            if detail {
+                draw_building(fb, &tiles, &season, snow, (x, y), r, folk, lit);
+            } else if lit {
+                fb.fill(r, FIRE);
+            }
             if overlay == Overlay::LandValue {
                 match land.get(x, y) {
                     Some(value) => fb.tint(r, value_color(value), 0.55),
@@ -416,7 +545,7 @@ pub fn render(
             if let Some(f) = folk {
                 let other =
                     |dx: i32, dy: i32| tile_folk(x + dx, y + dy).map(|o| o.civ) != Some(f.civ);
-                let edge = shade(f.color, 1.15);
+                let edge = edge_of(f.color);
                 if other(-1, 0) {
                     fb.fill(Rect::new(r.x0, r.y0, r.x0 + border, r.y1), edge);
                 }
@@ -436,6 +565,51 @@ pub fn render(
     let civs = sim.world.read::<Civ>();
     let owners = sim.world.read::<Owner>();
     let positions = sim.world.read::<Position>();
+
+    // A failed monsoon: a dashed ring round the area whose harvest will be poor.
+    if let Some((c, r2)) = sim.world.resource::<Drought>().area {
+        let (cx, cy) = cam.to_screen(c.x as f32 + 0.5, c.y as f32 + 0.5, fb);
+        let r = (r2 as f32).sqrt() * cam.zoom;
+        fb.ring(cx, cy, r, 3.0 * u, INK, true);
+        fb.ring(cx, cy, r, 2.0 * u, HUNGRY, true);
+    }
+
+    // Towns: a marker sized by population when zoomed out, and rings round any town
+    // with plague (red) or hunger (orange) at every zoom.
+    for (e, city) in sim.world.read::<City>().iter() {
+        let (Some(p), Some(f)) = (positions.get(e), folk_of.get(&e)) else {
+            continue;
+        };
+        let (cx, cy) = cam.to_screen(p.x as f32 + 0.5, p.y as f32 + 0.5, fb);
+        if cx < -40.0 || cy < -40.0 || cx > fb.width as f32 + 40.0 || cy > fb.height as f32 + 40.0 {
+            continue;
+        }
+        let size = marker_size(city.population) * u;
+        if cam.zoom < OVERVIEW_ZOOM {
+            fb.disc(cx, cy, size + u, INK);
+            fb.disc(cx, cy, size, shade(f.color, 1.25));
+            if city.population >= 1500 {
+                fb.disc(cx, cy, size * 0.4, WHITE);
+            }
+        }
+        let alarm = if city.outbreak.is_some() {
+            Some(SICK)
+        } else if city.starving {
+            Some(HUNGRY)
+        } else {
+            None
+        };
+        if let Some(c) = alarm {
+            let r = if cam.zoom < OVERVIEW_ZOOM {
+                size + 3.5 * u
+            } else {
+                cam.zoom * 1.6
+            };
+            fb.ring(cx, cy, r, 2.6 * u, INK, false);
+            fb.ring(cx, cy, r, 1.6 * u, c, false);
+        }
+    }
+
     let color_of = |e: Entity| {
         owners
             .get(e)
@@ -727,37 +901,151 @@ fn dots(fb: &mut Framebuffer, r: Rect, color: Rgb, size: i32) {
     }
 }
 
+/// A town marker's radius in CSS pixels.
+fn marker_size(population: u32) -> f32 {
+    match population {
+        0..150 => 2.2,
+        150..600 => 3.0,
+        600..1500 => 3.8,
+        _ => 4.8,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelKind {
+    /// A state's name, over the middle of its towns.
+    State,
+    Town,
+    /// A note on the map, such as a failed monsoon.
+    Note,
+}
+
 pub struct Label {
+    pub kind: LabelKind,
     pub x: f32,
     pub y: f32,
     pub color: [u8; 3],
     pub text: String,
+    /// Labels that don't fit are dropped, lowest priority first.
+    pub priority: u32,
+    /// `plague` or `hunger` for a town in trouble, otherwise empty.
+    pub flag: &'static str,
 }
 
-/// Names of the towns on screen, positioned just above each town center. The page
-/// draws these as text on top of the pixels.
-pub fn city_labels(sim: &Simulation, cam: &Camera, fb: &Framebuffer) -> Vec<Label> {
-    if cam.zoom < 3.0 {
-        return Vec::new();
+/// The middle of each state's towns, weighted by their people, as a tile position.
+pub fn civ_centers(sim: &Simulation) -> BTreeMap<Entity, (f32, f32)> {
+    let owners = sim.world.read::<Owner>();
+    let positions = sim.world.read::<Position>();
+    let mut sums: BTreeMap<Entity, (f32, f32, f32)> = BTreeMap::new();
+    for (e, city) in sim.world.read::<City>().iter() {
+        let (Some(o), Some(p)) = (owners.get(e), positions.get(e)) else {
+            continue;
+        };
+        let w = city.population.max(1) as f32;
+        let s = sums.entry(o.0).or_default();
+        s.0 += p.x as f32 * w;
+        s.1 += p.y as f32 * w;
+        s.2 += w;
+    }
+    sums.into_iter()
+        .map(|(civ, (x, y, w))| (civ, (x / w + 0.5, y / w + 0.5)))
+        .collect()
+}
+
+/// Text to draw over the map: state names when zoomed out, town names (with their
+/// people when zoomed in), and notes. The page draws them, largest first, skipping any
+/// that would overlap.
+pub fn labels(sim: &Simulation, cam: &Camera, fb: &Framebuffer) -> Vec<Label> {
+    let mut out = Vec::new();
+    let on_screen = |x: f32, y: f32| {
+        x > -100.0 && y > -20.0 && x < fb.width as f32 + 100.0 && y < fb.height as f32 + 20.0
+    };
+    if let Some((c, r2)) = sim.world.resource::<Drought>().area {
+        let (x, y) = cam.to_screen(c.x as f32 + 0.5, c.y as f32 + 0.5, fb);
+        let y = y - (r2 as f32).sqrt() * cam.zoom;
+        if on_screen(x, y) {
+            out.push(Label {
+                kind: LabelKind::Note,
+                x,
+                y,
+                color: HUNGRY,
+                text: if sim.rules().setting == Setting::India {
+                    "Monsoon failed".to_string()
+                } else {
+                    "Harvest failed".to_string()
+                },
+                priority: u32::MAX,
+                flag: "",
+            });
+        }
+    }
+    let civs = sim.world.read::<Civ>();
+    if cam.zoom < OVERVIEW_ZOOM {
+        let towns = town_count(sim);
+        for (civ, (tx, ty)) in civ_centers(sim) {
+            let Some(c) = civs.get(civ) else { continue };
+            if !c.is_local() || towns.get(&civ).copied().unwrap_or(0) < 2 {
+                continue;
+            }
+            let (x, y) = cam.to_screen(tx, ty, fb);
+            if on_screen(x, y) {
+                out.push(Label {
+                    kind: LabelKind::State,
+                    x,
+                    y,
+                    color: shade(c.color, 1.3),
+                    text: c.name.clone(),
+                    priority: u32::MAX - 1,
+                    flag: "",
+                });
+            }
+        }
     }
     let folk_of = town_folk(sim);
     let positions = sim.world.read::<Position>();
-    sim.world
-        .read::<City>()
-        .iter()
-        .filter_map(|(e, city)| {
-            let p = positions.get(e)?;
-            let (x, y) = cam.to_screen(p.x as f32 + 0.5, p.y as f32, fb);
-            let on_screen = x > -100.0
-                && y > -20.0
-                && x < fb.width as f32 + 100.0
-                && y < fb.height as f32 + 20.0;
-            on_screen.then(|| Label {
-                x,
-                y,
-                color: folk_of.get(&e).map_or(WHITE, |f| f.color),
-                text: format!("{} {}", city.name, group(city.population)),
-            })
-        })
-        .collect()
+    for (e, city) in sim.world.read::<City>().iter() {
+        let Some(p) = positions.get(e) else { continue };
+        let (x, y) = cam.to_screen(p.x as f32 + 0.5, p.y as f32 + 0.5, fb);
+        if !on_screen(x, y) {
+            continue;
+        }
+        let gap = if cam.zoom < OVERVIEW_ZOOM {
+            (marker_size(city.population) + 2.0) * fb.scale
+        } else {
+            cam.zoom * 0.6
+        };
+        let flag = if city.outbreak.is_some() {
+            "plague"
+        } else if city.starving {
+            "hunger"
+        } else {
+            ""
+        };
+        out.push(Label {
+            kind: LabelKind::Town,
+            x,
+            y: y - gap,
+            color: folk_of.get(&e).map_or(WHITE, |f| shade(f.color, 1.3)),
+            text: if cam.zoom >= OVERVIEW_ZOOM {
+                format!("{} {}", city.name, group(city.population))
+            } else {
+                city.name.clone()
+            },
+            // Towns in trouble are named first, then the biggest.
+            priority: city.population + if flag.is_empty() { 0 } else { 1_000_000 },
+            flag,
+        });
+    }
+    out
+}
+
+fn town_count(sim: &Simulation) -> BTreeMap<Entity, u32> {
+    let owners = sim.world.read::<Owner>();
+    let mut count = BTreeMap::new();
+    for (e, _) in sim.world.read::<City>().iter() {
+        if let Some(o) = owners.get(e) {
+            *count.entry(o.0).or_insert(0) += 1;
+        }
+    }
+    count
 }

@@ -9,7 +9,7 @@ use crate::economy::{self, short, INPUTS, SECTORS};
 use crate::ecs::Entity;
 use crate::era::{self, Setting};
 use crate::history::{self, Outcome};
-use crate::render::{self, Camera, Framebuffer, Overlay};
+use crate::render::{self, Camera, Framebuffer, LabelKind, Overlay, Style};
 use crate::sim::{format_date, group, Position, Simulation};
 use crate::timelines::Timelines;
 
@@ -32,6 +32,7 @@ struct App {
     /// The reply to the player's last order.
     message: String,
     overlay: Overlay,
+    style: Style,
     /// Holds the last string handed to the page, so it stays valid until the next call.
     text: String,
 }
@@ -87,6 +88,7 @@ pub extern "C" fn init(seed: u32, width: u32, height: u32, scenario: u32) {
         unit: None,
         message: String::new(),
         overlay: Overlay::None,
+        style: Style::Auto,
         text: String::new(),
     };
     APP.with(|slot| *slot.borrow_mut() = Some(app));
@@ -119,6 +121,7 @@ pub extern "C" fn render() -> *const u32 {
             app.selected,
             app.unit.filter(|_| !app.unchanged_view),
             app.overlay,
+            app.style,
         );
         app.fb.pixels.as_ptr()
     })
@@ -132,6 +135,42 @@ pub extern "C" fn set_overlay(overlay: u32) {
             1 => Overlay::LandValue,
             _ => Overlay::None,
         }
+    });
+}
+
+/// How states are colored: 0 boldly when zoomed out (fading close in), 1 boldly
+/// always, 2 hardly at all.
+#[no_mangle]
+pub extern "C" fn set_style(style: u32) {
+    with_app(|app| {
+        app.style = match style {
+            1 => Style::States,
+            2 => Style::Land,
+            _ => Style::Auto,
+        }
+    });
+}
+
+/// Device pixels per CSS pixel, so markers and lines keep their size on screen.
+#[no_mangle]
+pub extern "C" fn set_scale(scale: f32) {
+    with_app(|app| app.fb.scale = scale.clamp(1.0, 4.0));
+}
+
+/// Centres the map on a tile, zooming in to see its towns.
+#[no_mangle]
+pub extern "C" fn focus(x: f32, y: f32) {
+    with_app(|app| app.camera.focus(x, y));
+}
+
+/// Zooms out to fit the whole map in the part of the screen from (`left`, `top`) to
+/// (`right`, `bottom`) in device pixels: the part the panels don't cover.
+#[no_mangle]
+pub extern "C" fn fit_view(left: f32, top: f32, right: f32, bottom: f32) {
+    with_app(|app| {
+        let sim = &app.t.yours;
+        let area = (left, top, right, bottom);
+        app.camera = Camera::fit_area(sim.width(), sim.height(), &app.fb, area);
     });
 }
 
@@ -190,6 +229,12 @@ pub extern "C" fn tap(x: f32, y: f32, reach: f32) -> u32 {
     })
 }
 
+/// Clears the picked tile.
+#[no_mangle]
+pub extern "C" fn clear_selection() {
+    with_app(|app| app.selected = None);
+}
+
 /// Lets go of the picked unit.
 #[no_mangle]
 pub extern "C" fn release_unit() {
@@ -246,7 +291,8 @@ pub extern "C" fn text_ptr() -> *const u8 {
 /// The side panel, as tab-separated lines:
 /// - `date<TAB>text` and `title<TAB>scenario`
 /// - `heads<TAB>local peoples heading<TAB>European powers heading`
-/// - `civ<TAB>#rrggbb<TAB>local (1 or 0)<TAB>name<TAB>towns<TAB>people<TAB>status`
+/// - `civ<TAB>#rrggbb<TAB>local (1 or 0)<TAB>name<TAB>towns<TAB>people<TAB>status<TAB>x
+///   <TAB>y`, with x and y the tile in the middle of its towns (empty if it has none)
 /// - `event<TAB>text`
 /// - `tile<TAB>description` and `unit<TAB>description`, with line breaks replaced by `|`
 /// - `say<TAB>reply to the last order`
@@ -274,10 +320,22 @@ pub extern "C" fn panel_text() -> usize {
             "heads\t{}\t{}\n",
             rules.locals_heading, rules.powers_heading
         );
+        let centers: std::collections::BTreeMap<String, (f32, f32)> = {
+            let civs = sim.world.read::<crate::sim::Civ>();
+            render::civ_centers(sim)
+                .into_iter()
+                .filter_map(|(e, c)| Some((civs.get(e)?.name.clone(), c)))
+                .collect()
+        };
         for civ in sim.civ_summaries() {
             let [r, g, b] = civ.color;
+            let (x, y) = centers
+                .get(&civ.name)
+                .map_or((String::new(), String::new()), |(x, y)| {
+                    (format!("{x:.1}"), format!("{y:.1}"))
+                });
             out += &format!(
-                "civ\t#{r:02x}{g:02x}{b:02x}\t{}\t{}\t{}\t{}\t{}\n",
+                "civ\t#{r:02x}{g:02x}{b:02x}\t{}\t{}\t{}\t{}\t{}\t{x}\t{y}\n",
                 civ.local as u8,
                 civ.name,
                 civ.cities,
@@ -310,17 +368,25 @@ pub extern "C" fn panel_text() -> usize {
     })
 }
 
-/// Town names to draw over the map: `x<TAB>y<TAB>#rrggbb<TAB>text` per line.
+/// Text to draw over the map, one per line:
+/// `kind<TAB>x<TAB>y<TAB>#rrggbb<TAB>text<TAB>priority<TAB>flag`, where kind is `state`,
+/// `town` or `note`, and flag is `plague`, `hunger` or empty. The page draws notes,
+/// then states, then towns by priority, skipping any that would overlap.
 #[no_mangle]
 pub extern "C" fn labels_text() -> usize {
     with_app(|app| {
         let mut out = String::new();
         let sim = shown(&app.t, app.unchanged_view);
-        for label in render::city_labels(sim, &app.camera, &app.fb) {
+        for label in render::labels(sim, &app.camera, &app.fb) {
             let [r, g, b] = label.color;
+            let kind = match label.kind {
+                LabelKind::State => "state",
+                LabelKind::Town => "town",
+                LabelKind::Note => "note",
+            };
             out += &format!(
-                "{}\t{}\t#{r:02x}{g:02x}{b:02x}\t{}\n",
-                label.x, label.y, label.text
+                "{kind}\t{:.0}\t{:.0}\t#{r:02x}{g:02x}{b:02x}\t{}\t{}\t{}\n",
+                label.x, label.y, label.text, label.priority, label.flag
             );
         }
         hand_over(app, out)

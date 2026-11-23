@@ -5,36 +5,56 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>a0</title>
   <style>
-    :root { color-scheme: dark; }
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #142c5c; font: 13px/1.4 system-ui, sans-serif; color: #eee; }
+    :root { color-scheme: dark; --bg: rgba(12, 16, 28, 0.9); --line: #2a3350; --accent: #5b6fd6; --muted: #99a; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #142c5c; font: 14px/1.4 system-ui, sans-serif; color: #eee; }
     canvas { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
     canvas.dragging { cursor: grabbing; }
-    .panel { position: fixed; background: rgba(12, 16, 28, 0.84); border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
-    #side { top: 12px; left: 12px; width: 290px; max-height: calc(100% - 24px); overflow: auto; box-sizing: border-box; }
-    header { display: flex; align-items: baseline; gap: 8px; }
-    h1 { font-size: 15px; margin: 0 0 2px; flex: 1; }
-    #toggle { display: none; }
-    #date { color: #aab; margin-bottom: 8px; }
-    .controls { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
-    button { background: #2a3350; color: #eee; border: 0; border-radius: 5px; padding: 5px 9px; font: inherit; cursor: pointer; }
+    .panel { position: fixed; background: var(--bg); border-radius: 10px; backdrop-filter: blur(6px); box-shadow: 0 2px 12px rgba(0,0,0,.35); }
+    button { background: #2a3350; color: #eee; border: 0; border-radius: 6px; padding: 7px 11px; font: inherit; cursor: pointer; min-height: 34px; }
     button:hover { background: #3a4570; }
-    button.on { background: #5b6fd6; }
+    button.on { background: var(--accent); }
+    .seg { display: flex; gap: 2px; background: #1b2238; border-radius: 8px; padding: 2px; }
+    .seg button { flex: 1; background: transparent; }
+    .seg button.on { background: var(--accent); }
+
+    /* Top bar: menu, date, play and speed. */
+    #bar { top: 12px; left: 12px; width: 340px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 6px 8px; z-index: 3; }
+    #bar .when { flex: 1; min-width: 0; }
+    #date { font-weight: 650; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #title { color: var(--muted); font-size: 11px; }
+    #menubtn { font-size: 18px; width: 38px; padding: 0; }
+    #play { width: 42px; padding: 0; font-size: 16px; }
+    #speed { min-width: 74px; }
+    #menu { top: 68px; left: 12px; width: 340px; box-sizing: border-box; padding: 10px 12px 12px; display: none; z-index: 4; }
+    #menu.open { display: block; }
+    #menu h2:first-child { margin-top: 0; }
+
+    /* The side panel; a bottom sheet on phones. */
+    #side { top: 68px; left: 12px; width: 340px; bottom: 12px; box-sizing: border-box; display: flex; flex-direction: column; z-index: 2; }
+    #handle { display: none; }
+    #tabs { margin: 10px 10px 0; }
+    #ticker { margin: 6px 12px 0; color: #ccd; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #ticker:empty { display: none; }
+    .body { overflow: auto; padding: 4px 12px 12px; flex: 1; overscroll-behavior: contain; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
-    td { padding: 1px 0; vertical-align: top; }
+    td { padding: 2px 0; vertical-align: top; }
     td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 6px; }
+    tr.go { cursor: pointer; }
+    tr.go:hover td { background: rgba(255,255,255,.04); }
+    .arrow { color: #667; }
     .status { color: #889; font-size: 11px; }
     .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
-    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #99a; margin: 8px 0 4px; }
+    h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 12px 0 4px; }
     #events div { color: #ccd; margin-bottom: 3px; }
     #tile, #unit { white-space: pre-line; }
-    #unitbox { display: none; border: 1px solid #c9a227; border-radius: 6px; padding: 6px 8px; margin: 8px 0; }
+    .card { background: #1b2238; border-radius: 8px; padding: 8px 10px; margin: 8px 0; }
+    #unitbox { display: none; border: 1px solid #c9a227; }
+    #unitbox .row { display: flex; gap: 6px; margin-top: 6px; }
     #say { color: #ffd76a; margin: 4px 0; }
-    .hint { color: #889; margin-top: 8px; font-size: 12px; }
-    .tabs { display: flex; gap: 4px; margin-bottom: 8px; border-bottom: 1px solid #2a3350; padding-bottom: 6px; }
-    .tabs button.on { background: #5b6fd6; }
+    .hint { color: #889; font-size: 12px; }
     .tab { display: none; }
     .tab.on { display: block; }
-    .chron { margin-bottom: 6px; padding-left: 18px; position: relative; }
+    .chron { margin-bottom: 8px; padding-left: 18px; position: relative; }
     .chron::before { position: absolute; left: 0; top: 0; width: 14px; text-align: center; font-weight: 700; }
     .chron.same::before { content: "✓"; color: #7fb37f; }
     .chron.diff::before { content: "≠"; color: #f0a640; }
@@ -42,56 +62,98 @@
     .chron.you::before { content: "★"; color: #ffd76a; }
     .chron b { font-weight: 600; }
     .chron .real { color: #889; font-size: 11px; }
-    .whatif { display: block; width: 100%; text-align: left; margin-bottom: 4px; }
+    .whatif { display: block; width: 100%; text-align: left; margin-bottom: 6px; }
     .whatif small { display: block; color: #aab; font-size: 11px; }
     .stat { display: flex; justify-content: space-between; gap: 8px; }
     .stat span:last-child { font-variant-numeric: tabular-nums; text-align: right; }
-    .real-num { color: #889; }
-    canvas.chart { position: static; width: 100%; height: 120px; cursor: default; touch-action: auto; display: block; margin: 4px 0 2px; }
-    .legend { font-size: 11px; color: #99a; }
+    .real-num { color: #889; display: block; font-size: 11px; }
+    .card { position: relative; }
+    .close { position: absolute; top: 4px; right: 4px; min-height: 0; width: 28px; height: 28px; padding: 0; background: transparent; color: #99a; }
+    canvas.chart { position: static; width: 100%; height: 120px; cursor: crosshair; touch-action: auto; display: block; margin: 4px 0 2px; }
+    .legend { font-size: 11px; color: var(--muted); }
     .legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin: 0 4px 0 8px; }
-    #compare { display: none; background: #1d2540; border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; font-size: 12px; color: #ccd; }
-    #compare.viewing { outline: 1px solid #9fc3ff; }
-    #compare button { margin-top: 4px; }
-    .alt { color: #9fc3ff; font-size: 12px; }
     .legend i.dash { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px) !important; }
     #readout { font-size: 12px; color: #ccd; min-height: 16px; margin: 4px 0 2px; }
+    .alt { color: #9fc3ff; font-size: 12px; }
     details { margin-top: 8px; color: #ccd; }
     details p { font-size: 12px; color: #aab; margin: 4px 0; }
     table.matrix td { font-size: 11px; text-align: right; padding: 1px 3px; font-variant-numeric: tabular-nums; }
     table.matrix td:first-child { text-align: left; }
-    #zoom { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
-    #zoom button { width: 40px; height: 40px; font-size: 20px; padding: 0; background: rgba(42, 51, 80, 0.9); }
-    @media (max-width: 600px) {
-      #side { top: auto; bottom: 0; left: 0; right: 0; width: auto; max-height: 48%; border-radius: 12px 12px 0 0; }
-      #side.collapsed { max-height: 76px; overflow: hidden; }
-      #toggle { display: inline-block; }
-      #zoom { bottom: auto; top: 12px; }
-      button { padding: 7px 11px; }
+
+    /* Comparing with the unchanged world. */
+    #compare { top: 12px; left: 364px; max-width: 360px; padding: 6px 8px 6px 12px; display: none; align-items: center; gap: 8px; font-size: 12px; color: #ccd; z-index: 3; }
+    #compare.shown { display: flex; }
+    #compare.viewing { outline: 2px solid #9fc3ff; }
+    #cmptext { flex: 1; }
+
+    /* Map legend and zoom. */
+    #zoom { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; z-index: 1; }
+    #zoom button { width: 42px; height: 42px; font-size: 20px; padding: 0; background: rgba(42, 51, 80, 0.92); }
+    .key { font-size: 12px; color: #ccd; line-height: 1.8; }
+    .key i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -2px; margin-right: 6px; box-sizing: border-box; }
+
+    @media (max-width: 700px) {
+      #bar { top: 0; left: 0; right: 0; width: auto; border-radius: 0; padding: max(6px, env(safe-area-inset-top)) 8px 6px; }
+      #menu { top: 56px; left: 8px; right: 8px; width: auto; max-height: calc(100% - 180px); overflow: auto; }
+      #compare { top: 58px; left: 8px; right: 60px; max-width: none; }
+      #zoom { top: 62px; bottom: auto; right: 8px; }
+      #side { top: auto; left: 0; right: 0; bottom: 0; width: auto; height: 50%; border-radius: 14px 14px 0 0; transition: height .18s ease; padding-bottom: env(safe-area-inset-bottom); }
+      #side.dragging { transition: none; }
+      #side[data-state=peek] { height: 112px; }
+      #side[data-state=full] { height: calc(100% - 64px); }
+      #side[data-state=peek] .body { display: none; }
+      #handle { display: block; height: 22px; cursor: grab; touch-action: none; flex: none; }
+      #handle::before { content: ""; display: block; width: 40px; height: 5px; border-radius: 3px; background: #4a5578; margin: 9px auto 0; }
+      #tabs { margin-top: 0; }
     }
   </style>
 </head>
 <body>
   <canvas id="view"></canvas>
-  <div class="panel" id="side">
-    <header><h1 id="title">a0</h1><button id="toggle">▾</button></header>
-    <div id="date">Loading…</div>
-    <div id="compare"><div id="cmptext"></div><button id="cmpview">Show the unchanged world</button></div>
-    <div class="controls" id="speeds"></div>
-    <div class="controls" id="scenarios"></div>
-    <div class="controls"><button id="landvalue" title="Color town lots by what they're worth">Land value</button></div>
-    <div class="tabs" id="tabs"><button data-tab="world" class="on">World</button><button data-tab="history">History</button><button data-tab="economy">Economy</button></div>
-    <div class="tab on" id="tab-world">
-    <div id="unitbox">
-      <div id="unit"></div>
-      <div id="say"></div>
-      <div class="controls" style="margin:4px 0 0"><button id="auto">Automatic</button><button id="done">Done</button></div>
+
+  <div class="panel" id="bar">
+    <button id="menubtn" title="Menu" aria-label="Menu">☰</button>
+    <div class="when"><div id="date">Loading…</div><div id="title">a0</div></div>
+    <button id="play" title="Play or pause (space)" aria-label="Play or pause">❚❚</button>
+    <button id="speed" title="Speed">Normal</button>
+  </div>
+
+  <div class="panel" id="menu">
+    <h2>Scenario</h2>
+    <div class="seg" id="scenarios"></div>
+    <div style="margin-top:6px"><button id="new" style="width:100%">New random world</button></div>
+    <h2>Map colours</h2>
+    <div class="seg" id="styles"><button data-style="0" class="on">Auto</button><button data-style="1">States</button><button data-style="2">Land</button></div>
+    <div class="hint" style="margin-top:4px">Auto colours states boldly when zoomed out and shows the land close in.</div>
+    <h2>Overlay</h2>
+    <button id="landvalue" title="Color town lots by what they're worth">Land value</button>
+    <h2>Map key</h2>
+    <div class="key">
+      <div><i style="background:#3c9a58;border:2px solid #10121c"></i>Town, sized by people (white centre: a city)</div>
+      <div><i style="border:2px solid #ee4040"></i>Plague or another epidemic ☠</div>
+      <div><i style="border:2px solid #f4a838"></i>Hunger ⚠</div>
+      <div><i style="border:2px dashed #f4a838;border-radius:50%"></i>Failed monsoon or harvest</div>
     </div>
-    <div id="civs"></div>
-    <h2>Selected tile</h2>
-    <div id="tile">Tap a tile to inspect it, or a ship or settlers to give them orders.</div>
-    <h2>Events</h2>
-    <div id="events"></div>
+    <div class="hint" style="margin-top:8px">Drag to pan · pinch or scroll to zoom · tap a state in the World tab to go to it · space pauses · seed <span id="seed"></span></div>
+  </div>
+
+  <div class="panel" id="compare"><div id="cmptext"></div><button id="cmpview">Show unchanged</button></div>
+
+  <div class="panel" id="side" data-state="half">
+    <div id="handle" title="Drag or tap to resize"></div>
+    <div class="seg" id="tabs"><button data-tab="world" class="on">World</button><button data-tab="history">History</button><button data-tab="economy">Economy</button></div>
+    <div id="ticker"></div>
+    <div class="body">
+    <div class="tab on" id="tab-world">
+      <div id="unitbox" class="card">
+        <div id="unit"></div>
+        <div id="say"></div>
+        <div class="row"><button id="auto">Automatic</button><button id="done">Done</button></div>
+      </div>
+      <div id="tilebox" class="card" style="display:none"><button id="untile" class="close" aria-label="Close">✕</button><div id="tile"></div></div>
+      <div id="civs"></div>
+      <h2>Events</h2>
+      <div id="events"></div>
     </div>
     <div class="tab" id="tab-history">
       <div id="nohistory" class="hint" style="display:none">Real history plays out in the India scenario.</div>
@@ -126,10 +188,9 @@
         </details>
       </div>
     </div>
-    <div class="controls" style="margin-top:10px"><button id="new">New world</button></div>
-    <div class="hint">Drag to pan · pinch or scroll to zoom · space to pause · seed <span id="seed"></span></div>
+    </div>
   </div>
-  <div id="zoom"><button id="zin">+</button><button id="zout">−</button></div>
+  <div id="zoom"><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button><button id="zfit" title="Whole map" aria-label="Whole map">⤢</button></div>
 
   <script type="module">
     const canvas = document.getElementById("view");
@@ -157,6 +218,16 @@
       $("date").textContent = `Something went wrong: ${error.message || error}. Try reloading.`;
     }
 
+    // Fits the whole map into the part of the screen the panels leave free.
+    function fitMap() {
+      const s = dpr(), bar = $("bar").getBoundingClientRect(), side = $("side").getBoundingClientRect();
+      const phone = innerWidth <= 700;
+      const left = phone ? 0 : side.right + 8;
+      const top = phone ? bar.bottom + 4 : 8;
+      const bottom = phone ? side.top - 4 : innerHeight - 8;
+      wasm.fit_view(left * s, top * s, (innerWidth - (phone ? 0 : 60)) * s, bottom * s);
+    }
+
     // Render at device resolution, up to 2x, so the map stays crisp.
     const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
     function fitCanvas() {
@@ -171,7 +242,7 @@
     const scenarioButtons = scenarios.map(([label], i) => {
       const b = document.createElement("button");
       b.textContent = label;
-      b.onclick = () => { scenario = i; newWorld(); };
+      b.onclick = () => { scenario = i; closeMenu(); newWorld(); };
       $("scenarios").append(b);
       return b;
     });
@@ -186,13 +257,16 @@
         try {
           fitCanvas();
           wasm.init(seed, canvas.width, canvas.height, scenario);
+          wasm.set_scale(dpr());
           wasm.set_overlay(overlay);
+          wasm.set_style(style);
+          fitMap();
+          $("tilebox").style.display = "none";
           $("seed").textContent = seed;
           whatifKey = ""; seriesYears = -1; series = []; markYear = null; viewing = false;
           $("readout").textContent = "Tap a chart to read off a year.";
           $("chronicle").innerHTML = "Real events appear here as their dates come. ✓ as in history · ≠ went differently · ✗ didn't happen · ★ your change";
           showMatrix();
-          $("tile").textContent = "Tap a tile to inspect it, or a ship or settlers to give them orders.";
           history.replaceState(null, "", `?scenario=${scenarios[scenario][1]}&seed=${seed}`);
           ready = true;
           updatePanel();
@@ -203,7 +277,22 @@
     }
     newWorld();
     addEventListener("resize", () => { if (!ready) return; fitCanvas(); wasm.resize(canvas.width, canvas.height); });
-    $("new").onclick = () => { seed = Math.floor(Math.random() * 1e9); newWorld(); };
+    $("new").onclick = () => { seed = Math.floor(Math.random() * 1e9); closeMenu(); newWorld(); };
+
+    // The menu holds what's set now and then: scenario, map colours, overlays.
+    const closeMenu = () => { $("menu").classList.remove("open"); $("menubtn").classList.remove("on"); };
+    $("menubtn").onclick = () => {
+      const open = $("menu").classList.toggle("open");
+      $("menubtn").classList.toggle("on", open);
+    };
+    let style = 0;
+    for (const b of document.querySelectorAll("#styles button")) {
+      b.onclick = () => {
+        style = +b.dataset.style;
+        document.querySelectorAll("#styles button").forEach(x => x.classList.toggle("on", x === b));
+        if (ready) wasm.set_style(style);
+      };
+    }
     // Overlays: town lots colored from red (cheap) to green (dear).
     let overlay = 0;
     $("landvalue").onclick = () => {
@@ -212,28 +301,59 @@
       if (ready) wasm.set_overlay(overlay);
     };
     $("auto").onclick = () => { if (ready) { wasm.automate(); updatePanel(); } };
+    $("untile").onclick = () => { if (ready) { wasm.clear_selection(); updatePanel(); } };
     $("done").onclick = () => { if (ready) { wasm.release_unit(); updatePanel(); } };
-    $("toggle").onclick = () => {
-      const collapsed = $("side").classList.toggle("collapsed");
-      $("toggle").textContent = collapsed ? "▴" : "▾";
-    };
 
-    // Speed is in simulated months per real second.
+    // On a phone the panel is a bottom sheet: peek (tabs and the latest event), half,
+    // or full. Drag the handle to resize it, or tap it to open and close.
+    const sheet = $("side");
+    const sheetHeights = () => ({ peek: 112, half: innerHeight * 0.5, full: innerHeight - 64 });
+    const setSheet = state => { sheet.dataset.state = state; sheet.style.height = ""; };
+    {
+      let start = null;
+      $("handle").addEventListener("pointerdown", e => {
+        start = { y: e.clientY, h: sheet.getBoundingClientRect().height, moved: 0 };
+        $("handle").setPointerCapture(e.pointerId);
+        sheet.classList.add("dragging");
+      });
+      $("handle").addEventListener("pointermove", e => {
+        if (!start) return;
+        start.moved = Math.max(start.moved, Math.abs(e.clientY - start.y));
+        const h = Math.min(innerHeight - 64, Math.max(80, start.h - (e.clientY - start.y)));
+        sheet.style.height = `${h}px`;
+      });
+      const end = () => {
+        if (!start) return;
+        sheet.classList.remove("dragging");
+        const now = sheet.getBoundingClientRect().height;
+        if (start.moved < 6) {
+          setSheet(sheet.dataset.state === "peek" ? "half" : "peek");
+        } else {
+          const heights = sheetHeights();
+          const nearest = Object.keys(heights).reduce((a, b) => Math.abs(heights[b] - now) < Math.abs(heights[a] - now) ? b : a);
+          setSheet(nearest);
+        }
+        start = null;
+        if (tab === "economy") { seriesYears = -1; }
+      };
+      $("handle").addEventListener("pointerup", end);
+      $("handle").addEventListener("pointercancel", end);
+    }
+
+    // Speed is in simulated months per real second. The play button pauses and
+    // resumes; the speed button steps through the speeds.
     const speeds = [["Pause", 0], ["Slow", 1], ["Normal", 4], ["Fast", 12], ["Fastest", 48]];
     let speed = 2, lastSpeed = 2;
-    const speedButtons = speeds.map(([label], i) => {
-      const b = document.createElement("button");
-      b.textContent = label;
-      b.onclick = () => setSpeed(i);
-      $("speeds").append(b);
-      return b;
-    });
     function setSpeed(i) {
       if (i !== 0) lastSpeed = i;
       speed = i;
-      speedButtons.forEach((b, j) => b.classList.toggle("on", j === i));
+      $("play").textContent = speed === 0 ? "▶" : "❚❚";
+      $("play").classList.toggle("on", speed === 0);
+      $("speed").textContent = speeds[lastSpeed][0];
     }
     setSpeed(speed);
+    $("play").onclick = () => setSpeed(speed === 0 ? lastSpeed : 0);
+    $("speed").onclick = () => setSpeed(lastSpeed % (speeds.length - 1) + 1);
     addEventListener("keydown", e => {
       if (e.code === "Space") { e.preventDefault(); setSpeed(speed === 0 ? lastSpeed : 0); }
     });
@@ -277,6 +397,7 @@
       if (pointers.size < 2) pinch = null;
       if (pointers.size === 0) canvas.classList.remove("dragging");
       if (tapped && ready && e.type === "pointerup") {
+        if ($("menu").classList.contains("open")) { closeMenu(); return; }
         wasm.tap(e.clientX * dpr(), e.clientY * dpr(), 22 * dpr());
         updatePanel();
       }
@@ -291,6 +412,14 @@
     const zoomCenter = f => ready && wasm.zoom(f, canvas.width / 2, canvas.height / 2);
     $("zin").onclick = () => zoomCenter(1.5);
     $("zout").onclick = () => zoomCenter(1 / 1.5);
+    $("zfit").onclick = () => ready && fitMap();
+    // Tapping a state in the World tab takes the map there.
+    $("civs").addEventListener("click", e => {
+      const row = e.target.closest("tr.go");
+      if (!row || !ready) return;
+      wasm.focus(+row.dataset.x, +row.dataset.y);
+      if (innerWidth <= 700) setSheet("peek");
+    });
 
     const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
@@ -298,6 +427,7 @@
     let tab = "world";
     for (const b of document.querySelectorAll("#tabs button")) {
       b.onclick = () => {
+        if (sheet.dataset.state === "peek") setSheet("half");
         tab = b.dataset.tab;
         document.querySelectorAll("#tabs button").forEach(x => x.classList.toggle("on", x === b));
         document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.id === `tab-${tab}`));
@@ -323,7 +453,7 @@
           if (!ready) return;
           // The first change also builds the world without your changes, which takes
           // a moment: say so first.
-          if ($("compare").style.display !== "block") $("say2").textContent = "Changing history…";
+          if (!$("compare").classList.contains("shown")) $("say2").textContent = "Changing history…";
           setTimeout(() => { wasm.change_history(+i); whatifKey = ""; updatePanel(); }, 20);
         };
         box.append(b);
@@ -466,16 +596,16 @@
     // then runs alongside yours. You can look at its world on the map.
     let viewing = false, behind = 0;
     function showCompare(cmp) {
-      $("compare").style.display = cmp ? "block" : "none";
+      $("compare").classList.toggle("shown", !!cmp);
       if (!cmp) { behind = 0; return; }
       const [year, left] = cmp;
       behind = +left;
       $("compare").classList.toggle("viewing", viewing);
-      const replay = behind > 0 ? ` Replaying the world without your changes: ${Math.ceil(behind / 12)} years to go.` : "";
+      const replay = behind > 0 ? ` · catching up, ${Math.ceil(behind / 12)} yrs to go` : "";
       $("cmptext").textContent = viewing
-        ? `Showing the world as it would be without your changes.${replay}`
-        : `You changed history in ${year}.${replay || " The world without your changes runs alongside yours."}`;
-      $("cmpview").textContent = viewing ? "Back to your world" : "Show the unchanged world";
+        ? `Showing the world without your changes${replay}`
+        : `You changed history in ${year}${replay}`;
+      $("cmpview").textContent = viewing ? "Back to yours" : "Show unchanged";
     }
     $("cmpview").onclick = () => {
       if (!ready) return;
@@ -491,9 +621,10 @@
         if (kind === "title") $("title").textContent = `a0 · ${f[0]}`;
         if (kind === "heads") heads = f;
         if (kind === "civ") {
-          const [color, local, name, towns, people, status] = f;
+          const [color, local, name, towns, people, status, x, y] = f;
+          const go = x ? ` class=go data-x="${x}" data-y="${y}"` : "";
           groups[local === "1" ? 0 : 1].push(
-            `<tr><td><span class=swatch style="background:${color}"></span>${esc(name)}` +
+            `<tr${go}><td><span class=swatch style="background:${color}"></span>${esc(name)}${x ? "<span class=arrow> ›</span>" : ""}` +
             (status ? `<div class=status>${esc(status)}</div>` : "") +
             `</td><td class=n>${towns}</td><td class=n>${people}</td></tr>`);
         }
@@ -507,6 +638,9 @@
       $("civs").innerHTML = groups.map((rows, i) =>
         `<h2>${esc(heads[i])}</h2><table><tr><td></td><td class=n>towns</td><td class=n>people</td></tr>${rows.join("")}</table>`).join("");
       $("events").innerHTML = events;
+      const latest = rows.find(r => r[0] === "event");
+      $("ticker").textContent = latest ? latest[1] : "";
+      $("tilebox").style.display = tile !== null ? "block" : "none";
       if (tile !== null) $("tile").textContent = tile;
       $("unitbox").style.display = unit ? "block" : "none";
       if (unit) $("unit").textContent = unit;
@@ -514,19 +648,45 @@
       updateHistory(rows);
     }
 
+    // Map labels: notes first, then state names, then towns (towns in trouble and
+    // big towns first), leaving out any that would overlap one already drawn.
     function drawLabels() {
       const s = dpr();
-      ctx.font = `600 ${12 * s}px system-ui, sans-serif`;
+      const rank = { note: 0, state: 1, town: 2 };
+      const labels = text(wasm.labels_text()).split("\n").filter(Boolean).map(l => l.split("\t"))
+        .sort((a, b) => rank[a[0]] - rank[b[0]] || b[5] - a[5]);
+      const taken = [];
+      const free = b => !taken.some(t => b[0] < t[2] && b[2] > t[0] && b[1] < t[3] && b[3] > t[1]);
       ctx.textAlign = "center";
-      ctx.lineWidth = 3 * s;
-      ctx.strokeStyle = "rgba(0,0,0,0.7)";
-      for (const line of text(wasm.labels_text()).split("\n")) {
-        if (!line) continue;
-        const [x, y, color, label] = line.split("\t");
+      ctx.lineJoin = "round";
+      for (const [kind, sx, sy, color, raw, , flag] of labels) {
+        const x = +sx, y = +sy;
+        let label = raw;
+        if (kind === "state") {
+          label = raw.toUpperCase();
+          ctx.font = `700 ${13 * s}px system-ui, sans-serif`;
+          ctx.letterSpacing = `${1.5 * s}px`;
+        } else {
+          ctx.font = `600 ${kind === "note" ? 12 * s : 11.5 * s}px system-ui, sans-serif`;
+          ctx.letterSpacing = "0px";
+        }
+        if (flag === "plague") label = `☠ ${label}`;
+        if (flag === "hunger") label = `⚠ ${label}`;
+        const w = ctx.measureText(label).width, h = (kind === "state" ? 13 : 12) * s;
+        // State names sit on their middle; the rest just above their point.
+        const top = kind === "state" ? y - h / 2 : y - h;
+        const box = [x - w / 2 - 3 * s, top - 2 * s, x + w / 2 + 3 * s, top + h + 2 * s];
+        if (!free(box)) continue;
+        taken.push(box);
+        ctx.textBaseline = kind === "state" ? "middle" : "alphabetic";
+        ctx.lineWidth = (kind === "state" ? 4 : 3) * s;
+        ctx.strokeStyle = "rgba(8,10,18,0.85)";
         ctx.fillStyle = color;
-        ctx.strokeText(label, +x, +y - 4 * s);
-        ctx.fillText(label, +x, +y - 4 * s);
+        ctx.strokeText(label, x, y);
+        ctx.fillText(label, x, y);
       }
+      ctx.letterSpacing = "0px";
+      ctx.textBaseline = "alphabetic";
     }
 
     let last = performance.now(), pending = 0, lastPanel = 0, catchUp = 2;
