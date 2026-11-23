@@ -2,7 +2,9 @@
 //!
 //!     cargo run --release -- [years] [seed] [newworld|india]
 
-use a0::era::Setting;
+use a0::economy::short;
+use a0::era::{self, Setting};
+use a0::history::Outcome;
 use a0::sim::{format_date, group, Simulation};
 
 fn main() {
@@ -38,6 +40,41 @@ fn main() {
             }
         }
     }
+
+    let history = sim.history();
+    if !history.economy.years.is_empty() {
+        println!("\nIndia, this timeline against Maddison's estimates:");
+        println!("  year   population (real)    GDP, 1990 $ (real)     per head  fed  textiles");
+        for y in history.economy.years.iter().filter(|y| y.year % 25 == 0) {
+            println!(
+                "  {}  {:>7} ({:>7})  {:>9} ({:>9})  {:>7.0}  {:>3.0}%  {:>9}",
+                y.year,
+                short(y.population),
+                short(y.real_population),
+                short(y.gdp),
+                short(y.real_gdp),
+                y.per_head(),
+                100.0 * y.fed(),
+                short(y.output[1]),
+            );
+        }
+    }
+    println!("\nChronicle:");
+    for entry in &history.chronicle {
+        let mark = match entry.outcome {
+            Outcome::AsInHistory => "  ",
+            Outcome::Different => "≠ ",
+            Outcome::DidNotHappen => "✗ ",
+            Outcome::Yours => "★ ",
+        };
+        println!(
+            "  {mark}{} {}: {}",
+            era::year(entry.month),
+            entry.title,
+            entry.text
+        );
+    }
+    drop(history);
 
     println!("\nRecent events:");
     for event in sim.events().iter().take(16) {

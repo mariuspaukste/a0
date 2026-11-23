@@ -1,7 +1,9 @@
 # a0
 
-The age of sail, from 1600: a world that builds itself. Pick a scenario and watch
-peoples grow, ships arrive, colonies and trading posts take root, and harvests, winters,
+A historical simulation of the age of sail, from 1600. Watch real history play out
+against a world that builds itself, follow its statistics year by year, and change
+history to see how the future turns out differently. Peoples grow, ships arrive,
+colonies and trading posts take root, states rise and fall, and harvests, winters,
 famines and epidemics shape it all. Written in Rust with no dependencies and running in
 the browser as WebAssembly.
 
@@ -28,6 +30,42 @@ and weavers. A failed monsoon can bring famine.
 Both run on a real calendar with seasons: one harvest a year to last until the next,
 snow in northern winters, autumn colours, monsoon greens. Population numbers are scaled
 down to fit the map but keep their proportions.
+
+## History and what-ifs
+
+In the India scenario, real history from the Company's charter in 1600 to the Crown's
+takeover in 1858 plays out as a timeline of events. Each event has conditions, and it
+happens only if the simulated world still allows it. The Battle of Plassey needs an
+English factory in Bengal, a Nawab of Bengal to fight, and Clive, who made his name at
+Arcot in 1751. Events change the world: the Marathas, the Nawabs of Bengal and the
+Nizam of Hyderabad take over towns as the Mughal Empire comes apart, and the Company
+takes Bengal's revenues and then much of India.
+
+The **History** tab lets you change history: give Aurangzeb a strong heir, have France
+back Dupleix, keep Mir Jafar loyal at Plassey, bankrupt the Company, or fail the monsoon
+or start a plague where you tap. Later events check their conditions against the world
+as it now is. With a strong heir the empire holds together, so Bengal never breaks away,
+there is no Nawab to fight at Plassey, and no Company Raj follows. The chronicle marks
+each event ✓ as in history, ≠ went differently, ✗ didn't happen (and why), or ★ your
+change, next to what really happened.
+
+## Economy
+
+Each December the **Economy** tab adds up every Indian state with a Leontief
+input–output model of four sectors: farming, textiles, crafts and mining, and trade.
+Gross output is `x = (I − A)⁻¹ d`, where `A` holds what each sector buys from the others
+per unit of output and `d` is what households eat and wear plus cloth bought for
+export. GDP is the value added.
+
+Farming can't produce more than each town's harvest that year. When it falls short,
+households cut back on cloth and goods much more than on food, so a failed monsoon also
+hits the weavers. A state the Company rules pays part of its spending as revenue, which
+leaves as cloth shipped home.
+
+Totals are scaled so 1600 matches Angus Maddison's estimates for India (135 million
+people, $74 billion in 1990 dollars), and the charts set the timeline against his
+figures for later years. The input coefficients are round, illustrative numbers, not
+estimates for any real year.
 
 ## Towns
 
@@ -62,6 +100,8 @@ to pick it (it's ringed in gold and its route is dotted), then tap where it shou
 | --- | --- |
 | `src/ecs.rs` | A from-scratch Entity-Component-System: entities, sparse-set storages, resources, commands, schedule |
 | `src/era.rs` | The historical settings: peoples, powers, arrival dates, real towns and places, names, calendar and climate |
+| `src/history.rs` | Real history as a timeline of events with conditions and effects, the player's what-ifs, and the chronicle |
+| `src/economy.rs` | The yearly input–output (Leontief) accounts: output by sector, GDP, food, exports, Company revenue |
 | `src/world.rs` | Terrain: noise-generated continents, and the map of India |
 | `src/sim.rs` | Components, resources and the systems that run every month, plus orders for units |
 | `src/render.rs` | Software renderer that draws the world into a pixel buffer, with the seasons |
