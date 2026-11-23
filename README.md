@@ -92,8 +92,21 @@ great fire rebuilds in brick and stone, as Boston was ordered to after its fire 
 
 ## Controls
 
-Drag to pan, pinch or scroll to zoom, space to pause. Tap a tile to inspect it.
-**Land value** colours town lots from red (cheap) to green (dear).
+Drag to pan, pinch or scroll to zoom, and ⤢ to see the whole map. The top bar shows the
+date, with play/pause (or space) and a speed button. The ☰ menu holds the scenario, a
+new random world, map colours and the **Land value** overlay, which colours town lots
+from red (cheap) to green (dear). On a phone the panel is a bottom sheet: drag its
+handle, or tap it, to peek at the latest event, open it halfway or fill the screen.
+
+Tap a tile to inspect it, or a state in the World tab to go to it on the map.
+
+Zoomed out, the map colours states boldly and names them, and each town is a marker
+sized by its people (a white centre marks a city). Close in, the colours fade to show
+fields, streets and buildings. **Map colours** can keep states bold or faint at every
+zoom instead. A red ring marks a town with plague or another epidemic, an orange ring
+a town going hungry, and a dashed orange ring the area where the monsoon (or the
+harvest) has failed. Town names never overlap: towns in trouble and big towns are
+named first.
 
 Ships and bands of settlers run themselves, but you can take over any of them. Tap one
 to pick it (it's ringed in gold and its route is dotted), then tap where it should go:
