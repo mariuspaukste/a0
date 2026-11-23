@@ -90,6 +90,7 @@
     #zoom { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; z-index: 1; }
     #zoom button { width: 42px; height: 42px; font-size: 20px; padding: 0; background: rgba(42, 51, 80, 0.92); }
     .key { font-size: 12px; color: #ccd; line-height: 1.8; }
+    .key b.route { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 6px; box-shadow: 0 0 0 1px #10121c; }
     .key i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -2px; margin-right: 6px; box-sizing: border-box; }
 
     @media (max-width: 700px) {
@@ -125,14 +126,21 @@
     <h2>Map colours</h2>
     <div class="seg" id="styles"><button data-style="0" class="on">Auto</button><button data-style="1">States</button><button data-style="2">Land</button></div>
     <div class="hint" style="margin-top:4px">Auto colours states boldly when zoomed out and shows the land close in.</div>
-    <h2>Overlay</h2>
-    <button id="landvalue" title="Color town lots by what they're worth">Land value</button>
+    <h2>Show on the map</h2>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button id="routes" class="on" title="Goods moving from where they're grown to where they're woven and sold">Trade routes</button>
+      <button id="warsbtn" class="on" title="Battles, sieges and campaigns">Wars</button>
+      <button id="landvalue" title="Color town lots by what they're worth">Land value</button>
+    </div>
     <h2>Map key</h2>
     <div class="key">
       <div><i style="background:#3c9a58;border:2px solid #10121c"></i>Town, sized by people (white centre: a city)</div>
       <div><i style="border:2px solid #ee4040"></i>Plague or another epidemic ☠</div>
       <div><i style="border:2px solid #f4a838"></i>Hunger ⚠</div>
       <div><i style="border:2px dashed #f4a838;border-radius:50%"></i>Failed monsoon or harvest</div>
+      <div>⚔ Battle or siege: the arrow shows the attack; towns fought over are striped in the attacker's colour</div>
+      <div style="margin-top:4px">Trade routes, with goods moving toward the buyer:</div>
+      <div id="goodskey"></div>
     </div>
     <div class="hint" style="margin-top:8px">Drag to pan · pinch or scroll to zoom · tap a state in the World tab to go to it · space pauses · seed <span id="seed"></span></div>
   </div>
@@ -151,6 +159,7 @@
         <div class="row"><button id="auto">Automatic</button><button id="done">Done</button></div>
       </div>
       <div id="tilebox" class="card" style="display:none"><button id="untile" class="close" aria-label="Close">✕</button><div id="tile"></div></div>
+      <div id="warsbox" style="display:none"><h2>Wars</h2><table id="wars"></table></div>
       <div id="civs"></div>
       <h2>Events</h2>
       <div id="events"></div>
@@ -179,6 +188,11 @@
         <div id="states"></div>
         <h2>Output by sector</h2>
         <div id="sectors"></div>
+        <h2>Trade last year</h2>
+        <div id="goods"></div>
+        <h2>Biggest trade routes</h2>
+        <div id="routelist"></div>
+        <div class="hint">Loads a year. Cotton is carted to weaving centres; half of the cloth, silk, pepper, indigo and saltpetre is sold to the two nearest European factories. Tap a town on the map to see its trade.</div>
         <details>
           <summary>How the economy works</summary>
           <p>Each December a Leontief input–output model is run for every state. Column <i>j</i> below is what sector <i>j</i> buys from each sector to make one unit of output. Gross output is <i>x = (I − A)⁻¹ d</i>, where <i>d</i> is what households eat and wear plus cloth bought for export. GDP is the value added. The multiplier is how much the whole economy produces for one more unit of a sector's goods.</p>
@@ -260,6 +274,7 @@
           wasm.set_scale(dpr());
           wasm.set_overlay(overlay);
           wasm.set_style(style);
+          setLayers();
           fitMap();
           $("tilebox").style.display = "none";
           $("seed").textContent = seed;
@@ -295,6 +310,12 @@
     }
     // Overlays: town lots colored from red (cheap) to green (dear).
     let overlay = 0;
+    let routes = 1, warsOn = 1;
+    const setLayers = () => ready && wasm.set_layers(routes, warsOn);
+    $("routes").onclick = () => { routes ^= 1; $("routes").classList.toggle("on", !!routes); setLayers(); };
+    $("warsbtn").onclick = () => { warsOn ^= 1; $("warsbtn").classList.toggle("on", !!warsOn); setLayers(); };
+    $("goodskey").innerHTML = [["Raw cotton", "#d6d6ce"], ["Cloth", "#ffe4a0"], ["Raw silk", "#fabe3c"], ["Pepper", "#ec5c3c"], ["Indigo", "#5c78ff"], ["Saltpetre", "#b4fff0"]]
+      .map(([n, c]) => `<div><b class=route style="background:${c}"></b>${n}</div>`).join("");
     $("landvalue").onclick = () => {
       overlay = overlay ? 0 : 1;
       $("landvalue").classList.toggle("on", overlay === 1);
@@ -413,13 +434,15 @@
     $("zin").onclick = () => zoomCenter(1.5);
     $("zout").onclick = () => zoomCenter(1 / 1.5);
     $("zfit").onclick = () => ready && fitMap();
-    // Tapping a state in the World tab takes the map there.
-    $("civs").addEventListener("click", e => {
-      const row = e.target.closest("tr.go");
-      if (!row || !ready) return;
-      wasm.focus(+row.dataset.x, +row.dataset.y);
-      if (innerWidth <= 700) setSheet("peek");
-    });
+    // Tapping a state or a war in the World tab takes the map there.
+    for (const id of ["civs", "wars"]) {
+      $(id).addEventListener("click", e => {
+        const row = e.target.closest("tr.go");
+        if (!row || !ready) return;
+        wasm.focus(+row.dataset.x, +row.dataset.y);
+        if (innerWidth <= 700) setSheet("peek");
+      });
+    }
 
     const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
@@ -532,7 +555,7 @@
     addEventListener("resize", () => { seriesYears = -1; });
 
     function updateHistory(rows) {
-      let econ = null, sectors = [], states = [], chron = "", next = "", whatifs = [], say = "";
+      let econ = null, sectors = [], states = [], chron = "", next = "", whatifs = [], say = "", goods = [], routeRows = [];
       for (const [kind, ...f] of rows) {
         if (kind === "econ") econ = f;
         if (kind === "sector") sectors.push(f);
@@ -546,6 +569,8 @@
         }
         if (kind === "next") next += `<div>${f[0]} · ${esc(f[1])}</div>`;
         if (kind === "whatif") whatifs.push(f);
+        if (kind === "good") goods.push(f);
+        if (kind === "route") routeRows.push(f);
         if (kind === "say") say = f[0];
       }
       const india = scenarios[scenario][1] === "india";
@@ -574,6 +599,12 @@
           `<tr><td><span class=swatch style="background:${color}"></span>${esc(name)}</td><td class=n>${p}</td><td class=n>$${g}</td><td class=n>$${ph}</td><td class=n>${fd}%</td></tr>`).join("") +
         `</table>`;
       $("sectors").innerHTML = sectors.map(([name, out]) => stat(esc(name), `$${out}`)).join("");
+      $("goods").innerHTML = goods.length
+        ? `<table><tr><td></td><td class=n>made</td><td class=n>sold abroad</td></tr>` +
+          goods.map(([c, n, made, sold]) => `<tr><td><b class=route style="background:${c};display:inline-block;width:14px;height:4px;border-radius:2px;vertical-align:middle;margin-right:6px"></b>${esc(n)}</td><td class=n>${made}</td><td class=n>${n === "Raw cotton" ? "–" : sold}</td></tr>`).join("") + `</table>`
+        : `<div class=hint>Counted from the first January.</div>`;
+      $("routelist").innerHTML = routeRows.map(([c, good, from, to, flow]) =>
+        `<div class=stat><span><span class=swatch style="background:${c}"></span>${esc(from)} → ${esc(to)} <span class=real-num style="display:inline">${esc(good.toLowerCase())}</span></span><span>${flow}</span></div>`).join("");
       if (+year !== seriesYears || behind !== seriesBehind) {
         seriesYears = +year;
         seriesBehind = behind;
@@ -615,7 +646,7 @@
     };
     function updatePanel() {
       const rows = text(wasm.panel_text()).split("\n").filter(Boolean).map(l => l.split("\t"));
-      let heads = ["", ""], groups = [[], []], events = "", tile = null, unit = null, say = "", cmp = null;
+      let heads = ["", ""], groups = [[], []], events = "", tile = null, unit = null, say = "", cmp = null, wars = [];
       for (const [kind, ...f] of rows) {
         if (kind === "date") $("date").textContent = f[0];
         if (kind === "title") $("title").textContent = `a0 · ${f[0]}`;
@@ -633,7 +664,14 @@
         if (kind === "unit") unit = f[0].replaceAll("|", "\n");
         if (kind === "say") say = f[0];
         if (kind === "cmp") cmp = f;
+        if (kind === "war") {
+          const [active, year, name, status, x, y, color] = f;
+          wars.push(`<tr class=go data-x="${x}" data-y="${y}"><td><span class=swatch style="background:${color}"></span>` +
+            `${active === "1" ? "⚔ " : ""}${esc(name)}<span class=arrow> ›</span><div class=status>${year}${status ? " · " + esc(status) : ""}</div></td></tr>`);
+        }
       }
+      $("warsbox").style.display = wars.length ? "block" : "none";
+      $("wars").innerHTML = wars.join("");
       showCompare(cmp);
       $("civs").innerHTML = groups.map((rows, i) =>
         `<h2>${esc(heads[i])}</h2><table><tr><td></td><td class=n>towns</td><td class=n>people</td></tr>${rows.join("")}</table>`).join("");
@@ -707,7 +745,7 @@
           catchUp = took < 4 ? Math.min(120, catchUp * 2) : took > 8 ? Math.max(1, Math.floor(catchUp / 2)) : catchUp;
         }
 
-        const ptr = wasm.render();
+        const ptr = wasm.render(now);
         const pixels = new Uint8ClampedArray(wasm.memory.buffer, ptr, canvas.width * canvas.height * 4);
         ctx.putImageData(new ImageData(pixels, canvas.width, canvas.height), 0, 0);
         drawLabels();

@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use crate::ecs::{Entity, World};
 use crate::era;
 use crate::sim::{tally, City, Civ, Owner, Position, Tiles};
+use crate::trade::{Trade, CARGO_PER_VALUE};
 use crate::world::Map;
 
 pub const SECTORS: [&str; 4] = ["Farming", "Textiles", "Crafts and mining", "Trade"];
@@ -259,7 +260,7 @@ impl Year {
 pub struct Economy {
     /// Real people per simulated person, fixed in January 1600.
     pub people_scale: f64,
-    /// 1990 dollars per model unit, fixed in the first year.
+    /// 1990 dollars per model unit, fixed in January 1600.
     gdp_scale: f64,
     /// Cargoes each company had shipped home by the end of last year.
     shipped: BTreeMap<Entity, f32>,
@@ -290,7 +291,11 @@ impl Economy {
     pub fn start(&mut self, world: &World) {
         let year = era::START_YEAR as f64;
         self.people_scale = maddison(year).0 / local_population(world).max(1) as f64;
-        self.gdp_scale = 0.0;
+        // A person spends the household basket in a good year, so scale that to
+        // Maddison's GDP per head for 1600. (Scaling to the first year's own GDP would
+        // let a famine in 1600 skew every year after.)
+        let (people, gdp) = maddison(year);
+        self.gdp_scale = gdp / people * self.people_scale / BASKET.iter().sum::<f64>();
         self.years.clear();
         self.usual.clear();
         self.shipped = world
@@ -322,7 +327,18 @@ impl Economy {
                     .and_then(|_| positions.get(e).map(|p| (*p, civ)))
             })
             .collect();
-        let mut exports: BTreeMap<Entity, f64> = BTreeMap::new();
+        // Exports by sector. Where trade is traced town by town (see `crate::trade`),
+        // each state sold what its own towns sent to the factories, as cloth, raw
+        // goods or saltpetre. Otherwise each company's cargoes, shared among its
+        // factories, count as cloth from the state of the nearest Indian town.
+        let traced = world.resource::<Trade>().state_exports.clone();
+        let mut exports: BTreeMap<Entity, [f64; 4]> = BTreeMap::new();
+        for (state, value) in &traced {
+            let e = exports.entry(*state).or_default();
+            for j in 0..4 {
+                e[j] += (value[j] * CARGO_PER_VALUE) as f64 * CLOTH_PER_CARGO;
+            }
+        }
         for (company, c) in civs.iter().filter(|(_, c)| !c.is_local()) {
             let before = self.shipped.insert(company, c.exports).unwrap_or(0.0);
             let cargoes = (c.exports - before).max(0.0) as f64;
@@ -331,9 +347,12 @@ impl Economy {
                 .filter(|(e, _)| owners.get(*e).is_some_and(|o| o.0 == company))
                 .filter_map(|(e, _)| positions.get(e).copied())
                 .collect();
+            if !traced.is_empty() {
+                continue;
+            }
             for f in &factories {
                 if let Some((_, state)) = local_towns.iter().min_by_key(|(p, _)| p.dist2(*f)) {
-                    *exports.entry(*state).or_default() +=
+                    exports.entry(*state).or_default()[TEXTILES] +=
                         cargoes * CLOTH_PER_CARGO / factories.len() as f64;
                 }
             }
@@ -388,8 +407,7 @@ impl Economy {
                 continue;
             }
             let mut households = BASKET.map(|b| b * s.people);
-            let mut export = [0.0; 4];
-            export[TEXTILES] = exports.get(civ).copied().unwrap_or(0.0);
+            let mut export = exports.get(civ).copied().unwrap_or([0.0; 4]);
             let mut tribute = 0.0;
             if c.name == COMPANY_STATE {
                 tribute = TRIBUTE * households.iter().sum::<f64>();
@@ -416,16 +434,12 @@ impl Economy {
                 x,
                 gdp,
                 consumption,
-                export[TEXTILES] - tribute,
+                export.iter().sum::<f64>() - tribute,
                 tribute,
                 fed,
             ));
         }
 
-        let raw_gdp: f64 = states.iter().map(|s| s.3).sum();
-        if self.gdp_scale == 0.0 && raw_gdp > 0.0 {
-            self.gdp_scale = maddison(year as f64 + 0.5).1 / raw_gdp;
-        }
         let k = self.gdp_scale;
         let ps = self.people_scale;
         let states: Vec<Accounts> = states

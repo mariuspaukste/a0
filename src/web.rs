@@ -9,9 +9,10 @@ use crate::economy::{self, short, INPUTS, SECTORS};
 use crate::ecs::Entity;
 use crate::era::{self, Setting};
 use crate::history::{self, Outcome};
-use crate::render::{self, Camera, Framebuffer, LabelKind, Overlay, Style};
+use crate::render::{self, Camera, Framebuffer, LabelKind, Layers, Overlay, Style};
 use crate::sim::{format_date, group, Position, Simulation};
 use crate::timelines::Timelines;
+use crate::trade::{Trade, GOODS};
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -33,6 +34,7 @@ struct App {
     message: String,
     overlay: Overlay,
     style: Style,
+    layers: Layers,
     /// Holds the last string handed to the page, so it stays valid until the next call.
     text: String,
 }
@@ -89,6 +91,7 @@ pub extern "C" fn init(seed: u32, width: u32, height: u32, scenario: u32) {
         message: String::new(),
         overlay: Overlay::None,
         style: Style::Auto,
+        layers: Layers::default(),
         text: String::new(),
     };
     APP.with(|slot| *slot.borrow_mut() = Some(app));
@@ -110,10 +113,12 @@ pub extern "C" fn step(months: u32) {
     });
 }
 
-/// Draws a frame and returns a pointer to its RGBA pixels.
+/// Draws a frame at `time` milliseconds (for things that move) and returns a pointer
+/// to its RGBA pixels.
 #[no_mangle]
-pub extern "C" fn render() -> *const u32 {
+pub extern "C" fn render(time: f64) -> *const u32 {
     with_app(|app| {
+        app.layers.time = (time / 1000.0 % 3600.0) as f32;
         render::render(
             shown(&app.t, app.unchanged_view),
             &app.camera,
@@ -122,6 +127,7 @@ pub extern "C" fn render() -> *const u32 {
             app.unit.filter(|_| !app.unchanged_view),
             app.overlay,
             app.style,
+            app.layers,
         );
         app.fb.pixels.as_ptr()
     })
@@ -148,6 +154,15 @@ pub extern "C" fn set_style(style: u32) {
             2 => Style::Land,
             _ => Style::Auto,
         }
+    });
+}
+
+/// Shows trade routes (1) or not (0), and wars (1) or not (0).
+#[no_mangle]
+pub extern "C" fn set_layers(routes: u32, wars: u32) {
+    with_app(|app| {
+        app.layers.routes = routes == 1;
+        app.layers.wars = wars == 1;
     });
 }
 
@@ -309,6 +324,10 @@ pub extern "C" fn text_ptr() -> *const u8 {
 ///   `none` or `you`, and the last two are empty unless it went differently there
 /// - `next<TAB>year<TAB>title` for events still to come
 /// - `whatif<TAB>index<TAB>needs a tile (1 or 0)<TAB>title<TAB>description`
+/// - `war<TAB>going on (1 or 0)<TAB>year<TAB>name<TAB>status<TAB>x<TAB>y<TAB>#rrggbb`, newest
+///   first, with x and y its site's tile
+/// - `good<TAB>#rrggbb<TAB>name<TAB>loads made last year<TAB>loads sold abroad`
+/// - `route<TAB>#rrggbb<TAB>good<TAB>from<TAB>to<TAB>loads a year`, the largest first
 #[no_mangle]
 pub extern "C" fn panel_text() -> usize {
     with_app(|app| {
@@ -347,13 +366,78 @@ pub extern "C" fn panel_text() -> usize {
             out += &format!("event\t{event}\n");
         }
         if let Some((x, y)) = app.selected {
-            out += &format!("tile\t{}\n", sim.describe_tile(x, y).replace('\n', "|"));
+            let mut text = sim.describe_tile(x, y);
+            let town = sim.world.resource::<crate::sim::Tiles>().owner(x, y);
+            if let Some(town) = town {
+                let lines = crate::trade::describe(&sim.world, town);
+                if !lines.is_empty() {
+                    text += "\n\nTrade:\n";
+                    text += &lines.join("\n");
+                }
+            }
+            out += &format!("tile\t{}\n", text.replace('\n', "|"));
         }
         if let Some(text) = app.unit.and_then(|u| app.t.yours.describe_unit(u)) {
             out += &format!("unit\t{}\n", text.replace('\n', "|"));
         }
         if !app.message.is_empty() {
             out += &format!("say\t{}\n", app.message);
+        }
+        // Wars going on and lately over, newest first.
+        {
+            let month = sim.month();
+            let h = sim.history();
+            for war in h.wars.iter().rev().filter(|w| w.start <= month).take(6) {
+                let active = war.active(month);
+                let (taken, planned) = war.progress();
+                let status = if active && planned > 0 {
+                    format!("{taken} of {planned} towns taken")
+                } else if active {
+                    "Fighting now".to_string()
+                } else if planned > 0 {
+                    format!("Took {taken} towns")
+                } else {
+                    String::new()
+                };
+                let [r, g, b] = war.color;
+                out += &format!(
+                    "war\t{}\t{}\t{}\t{status}\t{}\t{}\t#{r:02x}{g:02x}{b:02x}\n",
+                    active as u8,
+                    era::year(war.start),
+                    war.name,
+                    war.site.x as f32 + 0.5,
+                    war.site.y as f32 + 0.5,
+                );
+            }
+        }
+        // Trade last year, and the biggest routes now.
+        {
+            let trade = sim.world.resource::<Trade>();
+            for good in GOODS {
+                let made = trade.last_produced.get(&good).copied().unwrap_or(0.0);
+                let sold = trade.last_exported.get(&good).copied().unwrap_or(0.0);
+                if made > 0.0 {
+                    let [r, g, b] = good.color();
+                    out += &format!(
+                        "good\t#{r:02x}{g:02x}{b:02x}\t{}\t{made:.0}\t{sold:.0}\n",
+                        good.name()
+                    );
+                }
+            }
+            let cities = sim.world.read::<crate::sim::City>();
+            let name = |e| cities.get(e).map_or(String::new(), |c| c.name.clone());
+            let mut routes: Vec<_> = trade.links.values().collect();
+            routes.sort_by(|a, b| (b.flow * b.good.price()).total_cmp(&(a.flow * a.good.price())));
+            for l in routes.iter().take(8) {
+                let [r, g, b] = l.good.color();
+                out += &format!(
+                    "route\t#{r:02x}{g:02x}{b:02x}\t{}\t{}\t{}\t{:.1}\n",
+                    l.good.name(),
+                    name(l.from),
+                    name(l.to),
+                    l.flow
+                );
+            }
         }
         if let Some(m) = app.t.changed_at {
             out += &format!(

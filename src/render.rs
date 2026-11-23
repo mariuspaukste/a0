@@ -6,12 +6,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::ecs::Entity;
+use crate::ecs::{Entity, World};
 use crate::era::{self, Culture, Setting};
+use crate::history::War;
 use crate::sim::{
     group, Building, Burning, City, Civ, Drought, LandValue, Owner, Position, Settler, Ship,
     Simulation, Tiles,
 };
+use crate::trade::Trade;
 use crate::world::{hash, Map, Terrain};
 
 type Rgb = [u8; 3];
@@ -80,6 +82,44 @@ impl Framebuffer {
             let w = w2.sqrt();
             let row = Rect::new((cx - w).round() as i32, y, (cx + w).round() as i32, y + 1);
             self.fill(row, color);
+        }
+    }
+
+    /// Diagonal stripes of `color` over `r`, continuous from tile to tile.
+    fn hatch(&mut self, r: Rect, color: Rgb, period: i32, width: i32) {
+        let x0 = r.x0.clamp(0, self.width as i32);
+        let x1 = r.x1.clamp(0, self.width as i32);
+        let y0 = r.y0.clamp(0, self.height as i32);
+        let y1 = r.y1.clamp(0, self.height as i32);
+        let c = pack(color);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if (x + y).rem_euclid(period) < width {
+                    self.pixels[y as usize * self.width + x as usize] = c;
+                }
+            }
+        }
+    }
+
+    /// A square dot of side `w` centred on a point.
+    fn dot(&mut self, x: f32, y: f32, w: f32, color: Rgb) {
+        let h = w / 2.0;
+        let r = Rect::new(
+            (x - h).round() as i32,
+            (y - h).round() as i32,
+            (x + h).round().max((x - h).round() + 1.0) as i32,
+            (y + h).round().max((y - h).round() + 1.0) as i32,
+        );
+        self.fill(r, color);
+    }
+
+    /// A straight line of width `w`.
+    fn line(&mut self, a: (f32, f32), b: (f32, f32), w: f32, color: Rgb) {
+        let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        let steps = (len / (w * 0.5).max(0.5)).ceil().max(1.0) as usize;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            self.dot(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, w, color);
         }
     }
 
@@ -411,6 +451,73 @@ pub enum Overlay {
     LandValue,
 }
 
+/// What's drawn over the map besides the land, and the time for things that move.
+#[derive(Clone, Copy, Debug)]
+pub struct Layers {
+    /// Trade routes, with goods moving along them.
+    pub routes: bool,
+    /// Wars: battle sites, advancing armies, and towns being fought over.
+    pub wars: bool,
+    /// Seconds, for animation.
+    pub time: f32,
+}
+
+impl Default for Layers {
+    fn default() -> Self {
+        Self {
+            routes: true,
+            wars: true,
+            time: 0.0,
+        }
+    }
+}
+
+/// How long after a war ends the map still marks it, in months.
+const WAR_AFTERGLOW: u32 = 6;
+
+/// The wars to draw now: those going on, and those just over.
+fn wars_now(sim: &Simulation) -> Vec<War> {
+    let month = sim.month();
+    sim.history()
+        .wars
+        .iter()
+        .filter(|w| w.start <= month && month <= w.end + WAR_AFTERGLOW)
+        .cloned()
+        .collect()
+}
+
+/// Points along a gentle curve from `a` to `b`, bowed to the left of the way it
+/// goes, so goods going each way between two towns travel on separate lines.
+/// Returns (x, y, distance along) every `step` pixels.
+fn curve(a: (f32, f32), b: (f32, f32), step: f32) -> Vec<(f32, f32, f32)> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        return Vec::new();
+    }
+    let bow = 0.16 * len;
+    let c = (
+        (a.0 + b.0) / 2.0 + dy / len * bow,
+        (a.1 + b.1) / 2.0 - dx / len * bow,
+    );
+    let n = (len * 1.1 / step).ceil().max(2.0) as usize;
+    let mut out = Vec::with_capacity(n + 1);
+    let mut along = 0.0;
+    let mut prev = a;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let u = 1.0 - t;
+        let p = (
+            u * u * a.0 + 2.0 * u * t * c.0 + t * t * b.0,
+            u * u * a.1 + 2.0 * u * t * c.1 + t * t * b.1,
+        );
+        along += ((p.0 - prev.0).powi(2) + (p.1 - prev.1).powi(2)).sqrt();
+        prev = p;
+        out.push((p.0, p.1, along));
+    }
+    out
+}
+
 /// How states are colored on the map.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Style {
@@ -475,6 +582,7 @@ pub fn render(
     unit: Option<Entity>,
     overlay: Overlay,
     style: Style,
+    layers: Layers,
 ) {
     fb.clear(SEA);
     let map = sim.world.resource::<Map>();
@@ -512,6 +620,19 @@ pub fn render(
     let drought = sim.world.resource::<Drought>().area;
     let parched =
         |x: i32, y: i32| drought.is_some_and(|(c, r2)| (x - c.x).pow(2) + (y - c.y).pow(2) <= r2);
+    // Towns being fought over are hatched in the attacker's color.
+    let wars = if layers.wars {
+        wars_now(sim)
+    } else {
+        Vec::new()
+    };
+    let month = sim.month();
+    let fought: BTreeMap<Entity, Rgb> = wars
+        .iter()
+        .filter(|w| w.active(month))
+        .flat_map(|w| w.towns.iter().map(move |t| (*t, w.color)))
+        .collect();
+    let stripe = (4.0 * u).round().max(2.0) as i32;
 
     for y in y0..y1 {
         let latitude = era::latitude(y, map.height);
@@ -527,6 +648,9 @@ pub fn render(
                 color = mix(color, [196, 138, 58], 0.3);
             }
             fb.fill(r, color);
+            if let Some(c) = tiles.owner(x, y).and_then(|t| fought.get(&t)) {
+                fb.hatch(r, shade(*c, 0.8), stripe * 2, stripe.max(2) / 2 + 1);
+            }
             let snow = season.snow(x, y, latitude);
             let lit = tiles.building(x, y) == Building::Ruins && burning.is_burning(x, y);
             if detail {
@@ -565,6 +689,44 @@ pub fn render(
     let civs = sim.world.read::<Civ>();
     let owners = sim.world.read::<Owner>();
     let positions = sim.world.read::<Position>();
+
+    // Trade routes: a dark track with goods moving along it toward the buyer, in the
+    // good's color, as wide as the trade is large.
+    if layers.routes {
+        let trade = sim.world.resource::<Trade>();
+        let mut links: Vec<_> = trade.links.values().collect();
+        links.sort_by(|a, b| a.flow.total_cmp(&b.flow));
+        let period = 12.0 * u;
+        let shift = (layers.time * 16.0 * u) % period;
+        // Zoomed out, only the larger routes, so the network stays readable.
+        let least = if cam.zoom < OVERVIEW_ZOOM { 0.6 } else { 0.0 };
+        for l in links.into_iter().filter(|l| l.flow >= least) {
+            let (Some(a), Some(b)) = (positions.get(l.from), positions.get(l.to)) else {
+                continue;
+            };
+            let a = cam.to_screen(a.x as f32 + 0.5, a.y as f32 + 0.5, fb);
+            let b = cam.to_screen(b.x as f32 + 0.5, b.y as f32 + 0.5, fb);
+            let off = |p: (f32, f32)| {
+                p.0 < -50.0
+                    || p.1 < -50.0
+                    || p.0 > fb.width as f32 + 50.0
+                    || p.1 > fb.height as f32 + 50.0
+            };
+            if off(a) && off(b) {
+                continue;
+            }
+            let w = (0.8 + l.flow.sqrt() * 0.9).min(4.0) * u;
+            let points = curve(a, b, w * 0.6);
+            for &(x, y, _) in &points {
+                fb.dot(x, y, w + 2.0 * u, INK);
+            }
+            let color = l.good.color();
+            for &(x, y, along) in &points {
+                let dash = (along - shift).rem_euclid(period) < period * 0.55;
+                fb.dot(x, y, w, if dash { color } else { shade(color, 0.45) });
+            }
+        }
+    }
 
     // A failed monsoon: a dashed ring round the area whose harvest will be poor.
     if let Some((c, r2)) = sim.world.resource::<Drought>().area {
@@ -629,6 +791,60 @@ pub fn render(
             let r = cam.tile_rect(p.x, p.y, fb);
             draw_ship(fb, r, color_of(e), ship.passengers > 0);
         }
+    }
+
+    // Wars: an arrow from where the attack comes from to the fighting, and crossed
+    // swords on the battlefield, pulsing while the fighting goes on.
+    let centers = if wars.is_empty() {
+        BTreeMap::new()
+    } else {
+        civ_centers(sim)
+    };
+    for war in &wars {
+        let active = war.active(month);
+        let site = cam.to_screen(war.site.x as f32 + 0.5, war.site.y as f32 + 0.5, fb);
+        let from = war
+            .from
+            .map(|p| (p.x as f32 + 0.5, p.y as f32 + 0.5))
+            .or_else(|| war.attacker.and_then(|a| centers.get(&a).copied()));
+        let color = if active {
+            war.color
+        } else {
+            mix(war.color, [120, 120, 120], 0.5)
+        };
+        if let Some((fx, fy)) = from.filter(|_| active) {
+            let a = cam.to_screen(fx, fy, fb);
+            let (dx, dy) = (site.0 - a.0, site.1 - a.1);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 30.0 * u {
+                let (ux, uy) = (dx / len, dy / len);
+                // Stop short of the swords, then a head.
+                let tip = (site.0 - ux * 13.0 * u, site.1 - uy * 13.0 * u);
+                let start = (a.0 + ux * 6.0 * u, a.1 + uy * 6.0 * u);
+                let back = (tip.0 - ux * 9.0 * u, tip.1 - uy * 9.0 * u);
+                let wings = [-1.0, 1.0]
+                    .map(|side: f32| (back.0 - uy * 6.0 * u * side, back.1 + ux * 6.0 * u * side));
+                fb.line(start, tip, 6.5 * u, INK);
+                for wing in wings {
+                    fb.line(wing, tip, 5.0 * u, INK);
+                }
+                fb.line(start, tip, 4.0 * u, color);
+                for wing in wings {
+                    fb.line(wing, tip, 3.0 * u, color);
+                }
+            }
+        }
+        if active {
+            let pulse = 11.0 * u + 3.0 * u * (layers.time * 4.0).sin();
+            fb.ring(site.0, site.1, pulse, 2.6 * u, INK, false);
+            fb.ring(site.0, site.1, pulse, 1.6 * u, SICK, false);
+        }
+        let k = 6.5 * u;
+        for (w, c) in [(4.0 * u, INK), (2.2 * u, WHITE)] {
+            fb.line((site.0 - k, site.1 - k), (site.0 + k, site.1 + k), w, c);
+            fb.line((site.0 + k, site.1 - k), (site.0 - k, site.1 + k), w, c);
+        }
+        fb.disc(site.0, site.1, 2.0 * u, color);
     }
 
     if let Some((x, y)) = selected {
@@ -934,10 +1150,15 @@ pub struct Label {
 
 /// The middle of each state's towns, weighted by their people, as a tile position.
 pub fn civ_centers(sim: &Simulation) -> BTreeMap<Entity, (f32, f32)> {
-    let owners = sim.world.read::<Owner>();
-    let positions = sim.world.read::<Position>();
+    civ_centers_of(&sim.world)
+}
+
+/// [`civ_centers`] for a bare world.
+pub fn civ_centers_of(world: &World) -> BTreeMap<Entity, (f32, f32)> {
+    let owners = world.read::<Owner>();
+    let positions = world.read::<Position>();
     let mut sums: BTreeMap<Entity, (f32, f32, f32)> = BTreeMap::new();
-    for (e, city) in sim.world.read::<City>().iter() {
+    for (e, city) in world.read::<City>().iter() {
         let (Some(o), Some(p)) = (owners.get(e), positions.get(e)) else {
             continue;
         };
@@ -974,6 +1195,21 @@ pub fn labels(sim: &Simulation, cam: &Camera, fb: &Framebuffer) -> Vec<Label> {
                 } else {
                     "Harvest failed".to_string()
                 },
+                priority: u32::MAX,
+                flag: "",
+            });
+        }
+    }
+    let month = sim.month();
+    for war in wars_now(sim).iter().filter(|w| w.active(month)) {
+        let (x, y) = cam.to_screen(war.site.x as f32 + 0.5, war.site.y as f32 + 0.5, fb);
+        if on_screen(x, y) {
+            out.push(Label {
+                kind: LabelKind::Note,
+                x,
+                y: y - 15.0 * fb.scale,
+                color: shade(war.color, 1.35),
+                text: format!("⚔ {}", war.name),
                 priority: u32::MAX,
                 flag: "",
             });
