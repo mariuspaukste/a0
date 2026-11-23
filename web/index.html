@@ -30,6 +30,30 @@
     #unitbox { display: none; border: 1px solid #c9a227; border-radius: 6px; padding: 6px 8px; margin: 8px 0; }
     #say { color: #ffd76a; margin: 4px 0; }
     .hint { color: #889; margin-top: 8px; font-size: 12px; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 8px; border-bottom: 1px solid #2a3350; padding-bottom: 6px; }
+    .tabs button.on { background: #5b6fd6; }
+    .tab { display: none; }
+    .tab.on { display: block; }
+    .chron { margin-bottom: 6px; padding-left: 18px; position: relative; }
+    .chron::before { position: absolute; left: 0; top: 0; width: 14px; text-align: center; font-weight: 700; }
+    .chron.same::before { content: "✓"; color: #7fb37f; }
+    .chron.diff::before { content: "≠"; color: #f0a640; }
+    .chron.none::before { content: "✗"; color: #e06060; }
+    .chron.you::before { content: "★"; color: #ffd76a; }
+    .chron b { font-weight: 600; }
+    .chron .real { color: #889; font-size: 11px; }
+    .whatif { display: block; width: 100%; text-align: left; margin-bottom: 4px; }
+    .whatif small { display: block; color: #aab; font-size: 11px; }
+    .stat { display: flex; justify-content: space-between; gap: 8px; }
+    .stat span:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+    .real-num { color: #889; }
+    canvas.chart { position: static; width: 100%; height: 120px; cursor: default; touch-action: auto; display: block; margin: 4px 0 2px; }
+    .legend { font-size: 11px; color: #99a; }
+    .legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin: 0 4px 0 8px; }
+    details { margin-top: 8px; color: #ccd; }
+    details p { font-size: 12px; color: #aab; margin: 4px 0; }
+    table.matrix td { font-size: 11px; text-align: right; padding: 1px 3px; font-variant-numeric: tabular-nums; }
+    table.matrix td:first-child { text-align: left; }
     #zoom { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
     #zoom button { width: 40px; height: 40px; font-size: 20px; padding: 0; background: rgba(42, 51, 80, 0.9); }
     @media (max-width: 600px) {
@@ -49,6 +73,8 @@
     <div class="controls" id="speeds"></div>
     <div class="controls" id="scenarios"></div>
     <div class="controls"><button id="landvalue" title="Color town lots by what they're worth">Land value</button></div>
+    <div class="tabs" id="tabs"><button data-tab="world" class="on">World</button><button data-tab="history">History</button><button data-tab="economy">Economy</button></div>
+    <div class="tab on" id="tab-world">
     <div id="unitbox">
       <div id="unit"></div>
       <div id="say"></div>
@@ -59,6 +85,39 @@
     <div id="tile">Tap a tile to inspect it, or a ship or settlers to give them orders.</div>
     <h2>Events</h2>
     <div id="events"></div>
+    </div>
+    <div class="tab" id="tab-history">
+      <div id="nohistory" class="hint" style="display:none">Real history plays out in the India scenario.</div>
+      <h2>Change history</h2>
+      <div id="whatifs"></div>
+      <div id="say2"></div>
+      <h2>Coming up</h2>
+      <div id="next"></div>
+      <h2>Chronicle</h2>
+      <div id="chronicle" class="hint" style="margin-top:0">Real events appear here as their dates come. ✓ as in history · ≠ went differently · ✗ didn't happen · ★ your change</div>
+    </div>
+    <div class="tab" id="tab-economy">
+      <div id="noecon" class="hint">The economy is added up each December in the India scenario.</div>
+      <div id="econ" style="display:none">
+        <h2 id="econyear">India</h2>
+        <div id="headline"></div>
+        <canvas class="chart" id="popchart"></canvas>
+        <div class="legend">Population<i style="background:#7fd0ff"></i>this timeline<i style="background:#888"></i>Maddison</div>
+        <canvas class="chart" id="gdpchart"></canvas>
+        <div class="legend">GDP, 1990 dollars<i style="background:#ffd76a"></i>this timeline<i style="background:#888"></i>Maddison</div>
+        <h2>States</h2>
+        <div id="states"></div>
+        <h2>Output by sector</h2>
+        <div id="sectors"></div>
+        <details>
+          <summary>How the economy works</summary>
+          <p>Each December a Leontief input–output model is run for every state. Column <i>j</i> below is what sector <i>j</i> buys from each sector to make one unit of output. Gross output is <i>x = (I − A)⁻¹ d</i>, where <i>d</i> is what households eat and wear plus cloth bought for export. GDP is the value added. The multiplier is how much the whole economy produces for one more unit of a sector's goods.</p>
+          <p>Farming can't produce more than the year's harvest in each town. When it falls short, households cut back on cloth and goods more than on food, so a failed monsoon also reaches the weavers. A state the Company rules pays part of its spending as revenue, which the Company spends on cloth to ship home.</p>
+          <p>The coefficients are round, illustrative numbers, not estimates for a real year. Totals are scaled so 1600 matches Angus Maddison's estimates for India (135 million people, $74 billion in 1990 dollars), and his figures are shown for comparison.</p>
+          <table class="matrix" id="matrix"></table>
+        </details>
+      </div>
+    </div>
     <div class="controls" style="margin-top:10px"><button id="new">New world</button></div>
     <div class="hint">Drag to pan · pinch or scroll to zoom · space to pause · seed <span id="seed"></span></div>
   </div>
@@ -121,6 +180,9 @@
           wasm.init(seed, canvas.width, canvas.height, scenario);
           wasm.set_overlay(overlay);
           $("seed").textContent = seed;
+          whatifKey = ""; seriesYears = -1; series = [];
+          $("chronicle").innerHTML = "Real events appear here as their dates come. ✓ as in history · ≠ went differently · ✗ didn't happen · ★ your change";
+          showMatrix();
           $("tile").textContent = "Tap a tile to inspect it, or a ship or settlers to give them orders.";
           history.replaceState(null, "", `?scenario=${scenarios[scenario][1]}&seed=${seed}`);
           ready = true;
@@ -222,6 +284,133 @@
     $("zout").onclick = () => zoomCenter(1 / 1.5);
 
     const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+    // Tabs: the world, real history and your changes to it, and the economy.
+    let tab = "world";
+    for (const b of document.querySelectorAll("#tabs button")) {
+      b.onclick = () => {
+        tab = b.dataset.tab;
+        document.querySelectorAll("#tabs button").forEach(x => x.classList.toggle("on", x === b));
+        document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.id === `tab-${tab}`));
+        if (tab === "economy") { seriesYears = -1; drawCharts(); }
+        if (ready) updatePanel();
+      };
+    }
+
+    // What-if buttons are rebuilt only when the choice changes, so a tap isn't lost
+    // to a panel refresh.
+    let whatifKey = "";
+    function showWhatIfs(list) {
+      const key = list.map(w => w[0]).join(",");
+      if (key === whatifKey) return;
+      whatifKey = key;
+      const box = $("whatifs");
+      box.innerHTML = list.length ? "" : `<div class=hint style="margin:0">Nothing to change just now.</div>`;
+      for (const [i, place, title, about] of list) {
+        const b = document.createElement("button");
+        b.className = "whatif";
+        b.innerHTML = `${esc(title)}<small>${esc(about)}${place === "1" ? " Tap the map first to pick the place." : ""}</small>`;
+        b.onclick = () => { if (ready) { wasm.change_history(+i); whatifKey = ""; updatePanel(); } };
+        box.append(b);
+      }
+    }
+
+    // Line charts of the timeline against Maddison's estimates.
+    let seriesYears = -1, series = [];
+    function chart(canvas, rows, sim, real, color) {
+      const s = dpr();
+      const w = canvas.clientWidth * s, h = canvas.clientHeight * s;
+      if (!w || !h) return;
+      canvas.width = w; canvas.height = h;
+      const g = canvas.getContext("2d");
+      g.clearRect(0, 0, w, h);
+      if (rows.length < 2) return;
+      const pad = 4 * s, left = 34 * s, bottom = 14 * s;
+      const x0 = rows[0][0], x1 = Math.max(rows[rows.length - 1][0], x0 + 1);
+      const top = Math.max(...rows.map(r => Math.max(r[sim], r[real]))) * 1.08;
+      const X = x => left + (x - x0) / (x1 - x0) * (w - left - pad);
+      const Y = y => h - bottom - y / top * (h - bottom - pad);
+      g.fillStyle = "#889"; g.font = `${10 * s}px system-ui`;
+      g.textAlign = "right";
+      for (const f of [0, 0.5, 1]) {
+        const v = top / 1.08 * f;
+        g.fillText(v >= 1e9 ? `${Math.round(v / 1e9)}bn` : `${Math.round(v / 1e6)}m`, left - 4 * s, Y(v) + 3 * s);
+        g.strokeStyle = "#2a3350"; g.lineWidth = s;
+        g.beginPath(); g.moveTo(left, Y(v)); g.lineTo(w - pad, Y(v)); g.stroke();
+      }
+      g.textAlign = "center";
+      g.fillText(x0, X(x0) + 10 * s, h - 2 * s);
+      g.fillText(rows[rows.length - 1][0], X(x1) - 10 * s, h - 2 * s);
+      for (const [k, col, width] of [[real, "#888", 1.5], [sim, color, 2]]) {
+        g.strokeStyle = col; g.lineWidth = width * s;
+        g.beginPath();
+        rows.forEach((r, i) => i ? g.lineTo(X(r[0]), Y(r[k])) : g.moveTo(X(r[0]), Y(r[k])));
+        g.stroke();
+      }
+    }
+    function drawCharts() {
+      if (tab !== "economy") return;
+      chart($("popchart"), series, 1, 2, "#7fd0ff");
+      chart($("gdpchart"), series, 3, 4, "#ffd76a");
+    }
+    addEventListener("resize", () => { seriesYears = -1; });
+
+    function updateHistory(rows) {
+      let econ = null, sectors = [], states = [], chron = "", next = "", whatifs = [], say = "";
+      for (const [kind, ...f] of rows) {
+        if (kind === "econ") econ = f;
+        if (kind === "sector") sectors.push(f);
+        if (kind === "state") states.push(f);
+        if (kind === "chron") {
+          const [outcome, year, title, text, real] = f;
+          const note = outcome === "you" ? "" : `<div class=real>In history: ${esc(real)}</div>`;
+          chron += `<div class="chron ${outcome}"><b>${year} · ${esc(title)}</b><div>${esc(text)}</div>${note}</div>`;
+        }
+        if (kind === "next") next += `<div>${f[0]} · ${esc(f[1])}</div>`;
+        if (kind === "whatif") whatifs.push(f);
+        if (kind === "say") say = f[0];
+      }
+      const india = scenarios[scenario][1] === "india";
+      $("nohistory").style.display = india ? "none" : "block";
+      showWhatIfs(whatifs);
+      $("say2").textContent = whatifs.length || say ? say : "";
+      $("say2").style.color = "#ffd76a";
+      $("next").innerHTML = next || `<div class=hint style="margin:0">Nothing more on the timeline.</div>`;
+      if (chron) $("chronicle").innerHTML = chron;
+      $("econ").style.display = econ ? "block" : "none";
+      $("noecon").style.display = econ ? "none" : "block";
+      if (!econ || tab !== "economy") return;
+      const [year, pop, realPop, gdp, realGdp, perHead, consumption, fed, exports, tribute] = econ;
+      $("econyear").textContent = `India, ${year}`;
+      const stat = (label, value, real) =>
+        `<div class=stat><span>${label}</span><span>${value}${real ? ` <span class=real-num>(real ${real})</span>` : ""}</span></div>`;
+      $("headline").innerHTML =
+        stat("Population", pop, realPop) + stat("GDP", `$${gdp}`, `$${realGdp}`) +
+        stat("GDP per head", `$${perHead}`) + stat("Spent by households, per head", `$${consumption}`) +
+        stat("Food needs met", `${fed}%`) + stat("Cloth exported", `$${exports}`) +
+        (tribute !== "0" ? stat("Revenue taken by the Company", `$${tribute}`) : "");
+      $("states").innerHTML = `<table><tr><td></td><td class=n>people</td><td class=n>GDP</td><td class=n>per head</td><td class=n>fed</td></tr>` +
+        states.map(([color, name, p, g, ph, fd]) =>
+          `<tr><td><span class=swatch style="background:${color}"></span>${esc(name)}</td><td class=n>${p}</td><td class=n>$${g}</td><td class=n>$${ph}</td><td class=n>${fd}%</td></tr>`).join("") +
+        `</table>`;
+      $("sectors").innerHTML = sectors.map(([name, out]) => stat(esc(name), `$${out}`)).join("");
+      if (+year !== seriesYears) {
+        seriesYears = +year;
+        series = text(wasm.series_text()).split("\n").filter(Boolean).map(l => l.split("\t").map(Number));
+        drawCharts();
+      }
+    }
+    function showMatrix() {
+      const rows = text(wasm.economy_text()).split("\n").filter(Boolean).map(l => l.split("\t"));
+      const names = rows.map(r => r[1]);
+      let html = `<tr><td>Inputs per unit of →</td>${names.map(n => `<td>${esc(n.split(" ")[0])}</td>`).join("")}</tr>`;
+      names.forEach((n, i) => {
+        html += `<tr><td>${esc(n)}</td>${rows.map(r => `<td>${r[2 + i]}</td>`).join("")}</tr>`;
+      });
+      html += `<tr><td>Value added</td>${rows.map(r => `<td>${r[6]}</td>`).join("")}</tr>`;
+      html += `<tr><td>Multiplier</td>${rows.map(r => `<td>${r[7]}</td>`).join("")}</tr>`;
+      $("matrix").innerHTML = html;
+    }
     function updatePanel() {
       const rows = text(wasm.panel_text()).split("\n").filter(Boolean).map(l => l.split("\t"));
       let heads = ["", ""], groups = [[], []], events = "", tile = null, unit = null, say = "";
@@ -248,6 +437,7 @@
       $("unitbox").style.display = unit ? "block" : "none";
       if (unit) $("unit").textContent = unit;
       $("say").textContent = say;
+      updateHistory(rows);
     }
 
     function drawLabels() {

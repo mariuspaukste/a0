@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::ecs::{Commands, Entity, Schedule, World};
 use crate::era::{self, Culture, Landing, Scenario, Setting};
+use crate::history::{self, History};
 use crate::world::{Map, Terrain};
 
 pub use crate::era::format_date;
@@ -119,13 +120,13 @@ pub struct Civ {
     pub trade_only: bool,
     /// When the first ship arrives (0 for peoples already there).
     pub arrival: u32,
-    emigrants_per_year: f32,
+    pub(crate) emigrants_per_year: f32,
     ship_passengers: u32,
     landing: Landing,
     /// Real places for new towns, nearest first (see [`era::Power::places`]).
     places: &'static [era::Town],
     /// The land a nation's towns stood on in 1600: it expands only within reach of it.
-    home: Vec<Position>,
+    pub(crate) home: Vec<Position>,
     shrine: &'static str,
     /// Builds up to 1 as people gather for the next ship.
     ship_progress: f32,
@@ -180,6 +181,37 @@ impl Civ {
             places: p.places,
             home: Vec::new(),
             shrine: "Church",
+            ship_progress: 0.0,
+            goods: 0.0,
+            exports: 0.0,
+            recent_exports: 0.0,
+            immigrants: 0,
+            arrived_this_year: 0,
+            shipped_this_year: 0.0,
+        }
+    }
+
+    /// A state that rises during the simulation, such as the Marathas or the Nawabs of
+    /// Bengal, and takes over towns that already stand (see [`crate::history`]).
+    pub(crate) fn successor(
+        name: &str,
+        people: &str,
+        color: [u8; 3],
+        shrine: &'static str,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            people: people.to_string(),
+            color,
+            culture: Culture::Indian,
+            trade_only: false,
+            arrival: 0,
+            emigrants_per_year: 0.0,
+            ship_passengers: 0,
+            landing: Landing::Latitude(0.5),
+            places: &[],
+            home: Vec::new(),
+            shrine,
             ship_progress: 0.0,
             goods: 0.0,
             exports: 0.0,
@@ -267,7 +299,7 @@ pub struct City {
     growth: f32,
     pub starving: bool,
     pub outbreak: Option<Outbreak>,
-    immune_until: u32,
+    pub(crate) immune_until: u32,
     /// A colony fresh from Europe suffers extra deaths until this month.
     seasoning_until: u32,
     /// When hunger here last made the news.
@@ -277,6 +309,9 @@ pub struct City {
     pub brick_since: Option<u32>,
     /// The month of the town's last fire and how many buildings it took.
     pub last_fire: Option<(u32, u32)>,
+    /// Food harvested, hunted and fished since the economy last added up the year
+    /// (see [`crate::economy`]).
+    pub(crate) food_income: f32,
 }
 
 impl City {
@@ -296,6 +331,7 @@ impl City {
             milestone: 0,
             brick_since: None,
             last_fire: None,
+            food_income: 0.0,
         }
     }
 }
@@ -303,9 +339,9 @@ impl City {
 /// An epidemic running through a town.
 pub struct Outbreak {
     pub disease: &'static str,
-    months_left: u32,
+    pub(crate) months_left: u32,
     /// Share of the people who die each month it lasts.
-    rate: f32,
+    pub(crate) rate: f32,
     pub deaths: f32,
 }
 
@@ -579,7 +615,7 @@ pub struct EventLog {
 }
 
 impl EventLog {
-    fn push(&mut self, month: u32, text: String) {
+    pub(crate) fn push(&mut self, month: u32, text: String) {
         self.entries
             .push_front(format!("{}: {}", format_date(month), text));
         self.entries.truncate(LOG_LENGTH);
@@ -1751,6 +1787,7 @@ fn city_economy(world: &World, _: &mut Commands) {
         if folk.trade_only {
             income += people;
         }
+        city.food_income += income;
         city.food += income - people;
         let unfed = (-city.food).max(0.0);
         city.food = city.food.clamp(0.0, people * 15.0 + 100.0);
@@ -2945,6 +2982,7 @@ impl Simulation {
         world.insert_resource(EventLog::default());
         world.insert_resource(Drought::default());
         world.insert_resource(Rules(scenario));
+        world.insert_resource(History::default());
 
         let schedule = Schedule::new()
             .with("monsoon", monsoon)
@@ -2961,6 +2999,7 @@ impl Simulation {
             .with("send_ships", send_ships)
             .with("sail_ships", sail_ships)
             .with("year_end", year_end)
+            .with("history", history::play)
             .with("advance_clock", advance_clock);
 
         // The land's own peoples have lived here for a long time. Place their towns
@@ -3021,11 +3060,29 @@ impl Simulation {
         for power in scenario.powers.iter().filter(|p| p.towns.is_empty()) {
             world.spawn((Civ::power(power),));
         }
+        // Real history starts playing against the simulation in January 1600.
+        history::start(&mut world);
         Self { world, schedule }
     }
 
     pub fn step_month(&mut self) {
         self.schedule.run(&mut self.world);
+    }
+
+    /// Real history as it has played out in this world so far, and the economy's
+    /// yearly accounts.
+    pub fn history(&self) -> std::cell::Ref<'_, History> {
+        self.world.resource::<History>()
+    }
+
+    /// The what-ifs (see [`history::what_ifs`]) the player can choose now.
+    pub fn what_ifs_now(&self) -> Vec<usize> {
+        history::available(&self.world)
+    }
+
+    /// Changes history with what-if `i`, at a tile for those that need one.
+    pub fn change_history(&mut self, i: usize, at: Option<Position>) -> String {
+        history::change(&mut self.world, i, at)
     }
 
     pub fn month(&self) -> u32 {
@@ -3103,6 +3160,11 @@ impl Simulation {
         for (e, _) in self.world.read::<Ship>().iter() {
             if let Some(s) = owners.get(e).and_then(|o| summaries.get_mut(&o.0)) {
                 s.ships += 1;
+            }
+        }
+        for s in summaries.values_mut() {
+            if s.local && s.cities == 0 {
+                s.status = "Holds no towns".to_string();
             }
         }
         // The land's own peoples first, then the Europeans in order of arrival.
@@ -3576,7 +3638,7 @@ fn place_villages(world: &mut World, civ: Entity, start: Position) {
 }
 
 /// Places towns that stood in 1600 at their real places, or the nearest open land.
-fn place_towns(world: &mut World, civ: Entity, towns: &[era::Town]) {
+pub(crate) fn place_towns(world: &mut World, civ: Entity, towns: &[era::Town]) {
     for town in towns {
         let spot = {
             let map = world.resource::<Map>();

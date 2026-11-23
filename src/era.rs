@@ -133,7 +133,8 @@ pub struct Scenario {
     pub sea_lanes: [bool; 3],
 }
 
-const fn month(year: u32, month: u32) -> u32 {
+/// Month `month` (1 to 12) of `year`, counted from January 1600.
+pub const fn month(year: u32, month: u32) -> u32 {
     (year - START_YEAR) * 12 + month - 1
 }
 
